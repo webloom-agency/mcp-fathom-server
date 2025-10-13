@@ -71,10 +71,10 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
         id,
         result: {
           protocolVersion: '2024-11-05',
-          capabilities: {
-            tools: {},
-            resources: {},
-            prompts: {}
+  capabilities: {
+    tools: {},
+    resources: {},
+    prompts: {}
           },
           serverInfo: {
             name: 'mcp-fathom-server',
@@ -95,8 +95,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
         jsonrpc: '2.0',
         id,
         result: {
-          tools: [
-            {
+  tools: [
+    {
               name: "search_meetings",
               description: "Search for Fathom meetings with comprehensive filtering. Can search by keywords in titles, summaries, action items, or attendees. Includes summaries, action items, and optional transcripts. Automatically excludes Executive and Personal teams.",
               inputSchema: {
@@ -195,9 +195,11 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           } else if (args.days_back) {
             const daysBack = Math.min(args.days_back, 365); // Cap at 1 year
             apiParams.created_after = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+            console.log(`Date filter: looking back ${daysBack} days from ${new Date().toISOString()}`);
           } else {
             // Default to 180 days
             apiParams.created_after = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString();
+            console.log(`Date filter: default 180 days back from ${new Date().toISOString()}`);
           }
 
           if (args.created_before) {
@@ -212,19 +214,27 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           console.log('API params:', JSON.stringify(apiParams, null, 2));
 
           // Get meetings from API with proper includes
-          const response = await fathomClient.listMeetings(apiParams);
+      const response = await fathomClient.listMeetings(apiParams);
           console.log(`Got ${response.items.length} meetings from API`);
 
           // Filter out excluded teams
           const excludeTeams = args.exclude_teams || ["Executive", "Personal"];
+          console.log(`Excluding teams: ${excludeTeams.join(', ')}`);
+          
           let filteredMeetings = response.items.filter(meeting => {
             const recordedByTeam = meeting.recorded_by?.team;
             const isExcluded = excludeTeams.some((team: string) => 
               recordedByTeam?.toLowerCase().includes(team.toLowerCase())
             );
+            
+            // Debug logging for team filtering
+            if (isExcluded) {
+              console.log(`Excluding meeting "${meeting.title || meeting.meeting_title}" - team: "${recordedByTeam}"`);
+            }
+            
             return !isExcluded;
           });
-          console.log(`After team filtering: ${filteredMeetings.length} meetings`);
+          console.log(`After team filtering: ${filteredMeetings.length} meetings (excluded ${response.items.length - filteredMeetings.length})`);
 
           // Search within the filtered meetings
           const searchLower = args.search_term.toLowerCase();
