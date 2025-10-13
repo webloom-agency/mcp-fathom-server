@@ -38,6 +38,7 @@ In your Render service settings, add these environment variables:
 ```
 FATHOM_API_KEY=your_fathom_api_key_here
 MCP_BEARER_TOKEN=your_secure_bearer_token_here
+MCP_TIMEOUT=300000
 ```
 
 ### 4. Deploy

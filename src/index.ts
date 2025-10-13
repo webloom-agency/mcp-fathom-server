@@ -41,6 +41,9 @@ const SearchMeetingsSchema = z.object({
 const apiKey = process.env.FATHOM_API_KEY;
 const bearerToken = process.env.MCP_BEARER_TOKEN;
 
+// Set MCP timeout environment variable
+process.env.MCP_TIMEOUT = process.env.MCP_TIMEOUT || '300000'; // 5 minutes
+
 if (!apiKey) {
   console.error("Error: FATHOM_API_KEY environment variable is required");
   process.exit(1);
@@ -102,7 +105,19 @@ async function handleSSEConnection(req: express.Request, res: express.Response) 
   console.log('Request content-type:', req.headers['content-type']);
   
   try {
-    // Create a new server instance for this connection
+    // Set keep-alive headers immediately
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Keep-Alive', 'timeout=300, max=1000');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Cache-Control');
+    
+    // Create SSE transport first to establish connection quickly
+    console.log('Creating SSE transport...');
+    const transport = new SSEServerTransport('/sse', res);
+    console.log('SSE transport created');
+    
+    // Create server and set up handlers asynchronously
     console.log('Creating new MCP server instance...');
     const server = createMCPServer();
     console.log('MCP server instance created');
@@ -112,25 +127,32 @@ async function handleSSEConnection(req: express.Request, res: express.Response) 
     setupServerHandlers(server);
     console.log('Server handlers set up');
     
-    // Create SSE transport - it will handle headers internally
-    console.log('Creating SSE transport...');
-    const transport = new SSEServerTransport('/sse', res);
-    console.log('SSE transport created');
+    console.log('Connecting server to transport...');
+    await server.connect(transport);
+    console.log('MCP Server connected to SSE transport successfully');
+    
+    // Set up heartbeat to keep connection alive
+    const heartbeat = setInterval(() => {
+      try {
+        res.write('data: {"type":"heartbeat","timestamp":' + Date.now() + '}\n\n');
+      } catch (error) {
+        console.log('Heartbeat failed, connection likely closed');
+        clearInterval(heartbeat);
+      }
+    }, 30000); // Every 30 seconds
     
     // Handle client disconnect
     req.on('close', () => {
       console.log('SSE connection closed');
+      clearInterval(heartbeat);
       transport.close();
     });
     
     req.on('error', (error) => {
       console.error('SSE connection error:', error);
+      clearInterval(heartbeat);
       transport.close();
     });
-    
-    console.log('Connecting server to transport...');
-    await server.connect(transport);
-    console.log('MCP Server connected to SSE transport successfully');
     
     // Keep the connection alive
     console.log('SSE connection established and ready for MCP communication');
@@ -296,10 +318,17 @@ async function main() {
   const port = process.env.PORT || 3000;
   console.log(`Using port: ${port}`);
 
+  // Set server timeouts
+  app.use((req, res, next) => {
+    req.setTimeout(300000); // 5 minutes
+    res.setTimeout(300000); // 5 minutes
+    next();
+  });
+
   // Middleware
   console.log('Setting up middleware...');
   app.use(cors());
-  app.use(express.json());
+  app.use(express.json({ limit: '10mb' }));
   console.log('Middleware set up');
 
   // Health check endpoint (no auth required)
@@ -315,12 +344,16 @@ async function main() {
   console.log('SSE routes set up');
 
   console.log('Starting server...');
-  app.listen(port, () => {
+  const server = app.listen(port, () => {
     console.log(`Fathom MCP Server running on port ${port}`);
     console.log(`SSE endpoint available at: http://localhost:${port}/sse`);
     console.log(`Health check available at: http://localhost:${port}/health`);
     console.log('Server startup complete');
   });
+
+  // Set server timeouts
+  server.keepAliveTimeout = 300000; // 5 minutes
+  server.headersTimeout = 300000; // 5 minutes
 }
 
 main().catch((error) => {
