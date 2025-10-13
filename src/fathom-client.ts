@@ -34,18 +34,19 @@ export class FathomClient {
         console.error('[listMeetings] First meeting summary:', firstMeeting.default_summary);
         console.error('[listMeetings] First meeting action_items:', firstMeeting.action_items);
         
-        // Check for alternative field names
+        // Check for alternative field names (using any to explore unknown fields)
+        const meetingAny = firstMeeting as any;
         console.error('[listMeetings] Checking for alternative summary fields:');
-        console.error('  - summary:', firstMeeting.summary);
-        console.error('  - meeting_summary:', firstMeeting.meeting_summary);
-        console.error('  - ai_summary:', firstMeeting.ai_summary);
-        console.error('  - notes:', firstMeeting.notes);
+        console.error('  - summary:', meetingAny.summary);
+        console.error('  - meeting_summary:', meetingAny.meeting_summary);
+        console.error('  - ai_summary:', meetingAny.ai_summary);
+        console.error('  - notes:', meetingAny.notes);
         
         console.error('[listMeetings] Checking for alternative action item fields:');
         console.error('  - action_items:', firstMeeting.action_items);
-        console.error('  - action_items_list:', firstMeeting.action_items_list);
-        console.error('  - tasks:', firstMeeting.tasks);
-        console.error('  - todo_items:', firstMeeting.todo_items);
+        console.error('  - action_items_list:', meetingAny.action_items_list);
+        console.error('  - tasks:', meetingAny.tasks);
+        console.error('  - todo_items:', meetingAny.todo_items);
       }
       
       return response.data;
