@@ -51,20 +51,54 @@ if (!bearerToken) {
 
 const fathomClient = new FathomClient(apiKey);
 
-// Bearer token authentication middleware
-function authenticateToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+// Bearer token authentication middleware for SSE
+function authenticateSSE(req: express.Request, res: express.Response, next: express.NextFunction) {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
   if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
+    res.status(401).json({ error: 'Access token required' });
+    return;
   }
 
   if (token !== bearerToken) {
-    return res.status(403).json({ error: 'Invalid access token' });
+    res.status(403).json({ error: 'Invalid access token' });
+    return;
   }
 
-  next();
+  // Don't call next() - we'll handle the SSE setup directly
+  handleSSEConnection(req, res);
+}
+
+// Handle SSE connection setup
+async function handleSSEConnection(req: express.Request, res: express.Response) {
+  console.log('New SSE connection established');
+  
+  // Set SSE headers
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Cache-Control'
+  });
+
+  // Create SSE transport
+  const transport = new SSEServerTransport('/sse', res);
+  
+  try {
+    await server.connect(transport);
+    console.log('MCP Server connected to SSE transport');
+  } catch (error) {
+    console.error('Failed to connect MCP server to SSE transport:', error);
+    res.end();
+  }
+
+  // Handle client disconnect
+  req.on('close', () => {
+    console.log('SSE connection closed');
+    transport.close();
+  });
 }
 
 const server = new Server({
@@ -204,35 +238,7 @@ async function main() {
   });
 
   // SSE endpoint with bearer token authentication
-  app.get('/sse', authenticateToken, async (req, res) => {
-    console.log('New SSE connection established');
-    
-    // Set SSE headers
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Cache-Control'
-    });
-
-    // Create SSE transport
-    const transport = new SSEServerTransport('/sse', res);
-    
-    try {
-      await server.connect(transport);
-      console.log('MCP Server connected to SSE transport');
-    } catch (error) {
-      console.error('Failed to connect MCP server to SSE transport:', error);
-      res.end();
-    }
-
-    // Handle client disconnect
-    req.on('close', () => {
-      console.log('SSE connection closed');
-      transport.close();
-    });
-  });
+  app.get('/sse', authenticateSSE);
 
   app.listen(port, () => {
     console.log(`Fathom MCP Server running on port ${port}`);
