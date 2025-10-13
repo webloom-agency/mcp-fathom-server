@@ -72,11 +72,13 @@ function createMCPServer() {
   return server;
 }
 
+// Store active connections
+const activeConnections = new Map<string, { server: Server, transport: any }>();
+
 // Bearer token authentication middleware for SSE
 function authenticateSSE(req: express.Request, res: express.Response, next: express.NextFunction) {
   console.log('Authenticating SSE request...');
   console.log('Request method:', req.method);
-  console.log('Request headers:', JSON.stringify(req.headers, null, 2));
   
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
@@ -119,31 +121,32 @@ function authenticateSSE(req: express.Request, res: express.Response, next: expr
     return;
   }
   
-  // For GET requests or other POST requests, handle as SSE connection
-  handleSSEConnection(req, res);
+  // For GET requests, establish persistent SSE connection
+  if (req.method === 'GET') {
+    handleSSEConnection(req, res);
+    return;
+  }
+  
+  // For other POST requests, they should be handled by the existing SSE connection
+  // This shouldn't happen in proper MCP SSE flow
+  console.log('Unexpected POST request to SSE endpoint:', req.body);
+  res.status(400).json({ error: 'Invalid request to SSE endpoint' });
 }
 
 // Handle SSE connection setup
 async function handleSSEConnection(req: express.Request, res: express.Response) {
-  console.log('New SSE connection established');
-  console.log('Request body:', req.body);
-  console.log('Request content-type:', req.headers['content-type']);
+  console.log('New persistent SSE connection established');
   
   try {
-    // Set keep-alive headers immediately
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('Keep-Alive', 'timeout=300, max=1000');
+    // Set proper SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', 'Cache-Control');
     
-    // Create SSE transport first to establish connection quickly
-    console.log('Creating SSE transport...');
-    const transport = new SSEServerTransport('/sse', res);
-    console.log('SSE transport created');
-    
-    // Create server and set up handlers asynchronously
-    console.log('Creating new MCP server instance...');
+    // Create ONE persistent MCP server instance for this connection
+    console.log('Creating persistent MCP server instance...');
     const server = createMCPServer();
     console.log('MCP server instance created');
     
@@ -152,12 +155,19 @@ async function handleSSEConnection(req: express.Request, res: express.Response) 
     setupServerHandlers(server);
     console.log('Server handlers set up');
     
+    // Create SSE transport
+    console.log('Creating SSE transport...');
+    const transport = new SSEServerTransport('/sse', res);
+    console.log('SSE transport created');
+    
+    // Connect server to transport
     console.log('Connecting server to transport...');
     await server.connect(transport);
     console.log('MCP Server connected to SSE transport successfully');
     
-    // The SSE transport should handle MCP protocol messages automatically
-    // We just need to ensure the connection is established properly
+    // Store the connection for cleanup
+    const connectionId = `${req.ip}-${Date.now()}`;
+    activeConnections.set(connectionId, { server, transport });
     
     // Set up heartbeat to keep connection alive
     const heartbeat = setInterval(() => {
@@ -166,24 +176,26 @@ async function handleSSEConnection(req: express.Request, res: express.Response) 
       } catch (error) {
         console.log('Heartbeat failed, connection likely closed');
         clearInterval(heartbeat);
+        activeConnections.delete(connectionId);
       }
     }, 30000); // Every 30 seconds
     
     // Handle client disconnect
     req.on('close', () => {
-      console.log('SSE connection closed');
+      console.log('SSE connection closed, cleaning up...');
       clearInterval(heartbeat);
+      activeConnections.delete(connectionId);
       transport.close();
     });
     
     req.on('error', (error) => {
       console.error('SSE connection error:', error);
       clearInterval(heartbeat);
+      activeConnections.delete(connectionId);
       transport.close();
     });
     
-    // Keep the connection alive
-    console.log('SSE connection established and ready for MCP communication');
+    console.log('Persistent SSE connection established and ready for MCP communication');
     
   } catch (error) {
     console.error('Failed to connect MCP server to SSE transport:', error);
