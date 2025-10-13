@@ -27,6 +27,27 @@ export class FathomClient {
         params: this.formatParams(params)
       });
       
+      // Debug: Log the first meeting to see what fields are available
+      if (response.data.items.length > 0) {
+        const firstMeeting = response.data.items[0];
+        console.error('[listMeetings] First meeting fields:', Object.keys(firstMeeting));
+        console.error('[listMeetings] First meeting summary:', firstMeeting.default_summary);
+        console.error('[listMeetings] First meeting action_items:', firstMeeting.action_items);
+        
+        // Check for alternative field names
+        console.error('[listMeetings] Checking for alternative summary fields:');
+        console.error('  - summary:', firstMeeting.summary);
+        console.error('  - meeting_summary:', firstMeeting.meeting_summary);
+        console.error('  - ai_summary:', firstMeeting.ai_summary);
+        console.error('  - notes:', firstMeeting.notes);
+        
+        console.error('[listMeetings] Checking for alternative action item fields:');
+        console.error('  - action_items:', firstMeeting.action_items);
+        console.error('  - action_items_list:', firstMeeting.action_items_list);
+        console.error('  - tasks:', firstMeeting.tasks);
+        console.error('  - todo_items:', firstMeeting.todo_items);
+      }
+      
       return response.data;
     } catch (error) {
       throw this.handleError(error);
@@ -35,8 +56,10 @@ export class FathomClient {
 
   async searchMeetings(searchTerm: string, includeTranscript: boolean = false): Promise<FathomMeeting[]> {
     // Search in the last 6 months to find more meetings
+    // Try to include summaries and action items
     const response = await this.listMeetings({
       include_transcript: false,
+      include_crm_matches: true, // This might help get more data
       created_after: new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString() // Last 180 days (6 months)
     });
     

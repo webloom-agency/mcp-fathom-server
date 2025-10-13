@@ -152,10 +152,14 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           tools: [
             {
               name: "list_meetings",
-              description: "List Fathom meetings with optional filters. Returns meeting titles, summaries, dates, and participants.",
+              description: "List Fathom meetings with optional filters. If search_term is provided, it will search for meetings containing that term. Returns meeting titles, summaries, dates, and participants.",
               inputSchema: {
                 type: "object",
                 properties: {
+                  search_term: {
+                    type: "string",
+                    description: "Search term to find in meeting titles, summaries, or action items (enables search mode)"
+                  },
                   calendar_invitees: {
                     type: "array",
                     items: { type: "string" },
@@ -234,6 +238,42 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
       
       try {
         if (name === "list_meetings") {
+          // If search_term is provided, use search functionality instead
+          if (args.search_term) {
+            console.log(`Search term provided, using search functionality for: "${args.search_term}"`);
+            const meetings = await fathomClient.searchMeetings(args.search_term, args.include_transcript || false);
+            console.log(`Found ${meetings.length} matching meetings`);
+            
+            const formattedMeetings = meetings.map(meeting => ({
+              title: meeting.title || meeting.meeting_title,
+              date: meeting.scheduled_start_time || meeting.created_at,
+              url: meeting.share_url || meeting.url,
+              attendees: meeting.calendar_invitees,
+              recorded_by: meeting.recorded_by,
+              summary: meeting.default_summary,
+              action_items: meeting.action_items,
+              transcript: args.include_transcript ? meeting.transcript : undefined
+            }));
+            
+            const result = {
+              jsonrpc: '2.0',
+              id,
+              result: {
+                content: [{
+                  type: "text",
+                  text: JSON.stringify({
+                    search_term: args.search_term,
+                    total_found: meetings.length,
+                    meetings: formattedMeetings
+                  }, null, 2)
+                }]
+              }
+            };
+            res.json(result);
+            return;
+          }
+          
+          // Regular list_meetings functionality
           const limit = args.limit || 50;
           const { limit: _, ...apiParams } = args;
           
