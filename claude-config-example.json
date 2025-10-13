@@ -1,10 +1,9 @@
 {
   "mcpServers": {
     "fathom": {
-      "command": "node",
-      "args": ["/absolute/path/to/mcp-fathom-server/dist/index.js"],
-      "env": {
-        "FATHOM_API_KEY": "your_fathom_api_key_here"
+      "url": "https://your-render-app.onrender.com/sse",
+      "headers": {
+        "Authorization": "Bearer your_mcp_bearer_token_here"
       }
     }
   }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { 
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -15,9 +15,8 @@ import {
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { FathomClient } from "./fathom-client.js";
-import dotenv from "dotenv";
-
-dotenv.config();
+import express from "express";
+import cors from "cors";
 
 const ListMeetingsSchema = z.object({
   calendar_invitees: z.array(z.string()).optional().describe("Filter by attendee email addresses"),
@@ -36,15 +35,37 @@ const SearchMeetingsSchema = z.object({
   include_transcript: z.boolean().optional().default(false).describe("Whether to search within transcripts (WARNING: Currently disabled for performance)")
 });
 
+// Environment variables validation
 const apiKey = process.env.FATHOM_API_KEY;
+const bearerToken = process.env.MCP_BEARER_TOKEN;
+
 if (!apiKey) {
   console.error("Error: FATHOM_API_KEY environment variable is required");
-  console.error("Please set it in your environment variables or Claude Desktop config");
-  console.error("See README.md for setup instructions");
+  process.exit(1);
+}
+
+if (!bearerToken) {
+  console.error("Error: MCP_BEARER_TOKEN environment variable is required");
   process.exit(1);
 }
 
 const fathomClient = new FathomClient(apiKey);
+
+// Bearer token authentication middleware
+function authenticateToken(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  if (token !== bearerToken) {
+    return res.status(403).json({ error: 'Invalid access token' });
+  }
+
+  next();
+}
 
 const server = new Server({
   name: "mcp-fathom-server",
@@ -170,10 +191,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
 });
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Fathom MCP Server started successfully");
-  console.error(`Connected to Fathom API`);
+  const app = express();
+  const port = process.env.PORT || 3000;
+
+  // Middleware
+  app.use(cors());
+  app.use(express.json());
+
+  // Health check endpoint (no auth required)
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok', service: 'mcp-fathom-server' });
+  });
+
+  // SSE endpoint with bearer token authentication
+  app.get('/sse', authenticateToken, async (req, res) => {
+    console.log('New SSE connection established');
+    
+    // Set SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Cache-Control'
+    });
+
+    // Create SSE transport
+    const transport = new SSEServerTransport('/sse', res);
+    
+    try {
+      await server.connect(transport);
+      console.log('MCP Server connected to SSE transport');
+    } catch (error) {
+      console.error('Failed to connect MCP server to SSE transport:', error);
+      res.end();
+    }
+
+    // Handle client disconnect
+    req.on('close', () => {
+      console.log('SSE connection closed');
+      transport.close();
+    });
+  });
+
+  app.listen(port, () => {
+    console.log(`Fathom MCP Server running on port ${port}`);
+    console.log(`SSE endpoint available at: http://localhost:${port}/sse`);
+    console.log(`Health check available at: http://localhost:${port}/health`);
+  });
 }
 
 main().catch((error) => {
