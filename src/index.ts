@@ -151,14 +151,55 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
         result: {
           tools: [
             {
-              name: "list_meetings",
-              description: "List Fathom meetings with optional filters. If search_term is provided, it will search for meetings containing that term. Returns meeting titles, summaries, dates, and participants.",
+              name: "search_meetings",
+              description: "Search for Fathom meetings with comprehensive filtering. Can search by keywords in titles, summaries, action items, or attendees. Includes summaries, action items, and optional transcripts. Automatically excludes Executive and Personal teams.",
               inputSchema: {
                 type: "object",
                 properties: {
                   search_term: {
                     type: "string",
-                    description: "Search term to find in meeting titles, summaries, or action items (enables search mode)"
+                    description: "Search term to find in meeting titles, summaries, action items, or attendee names"
+                  },
+                  limit: {
+                    type: "number",
+                    default: 50,
+                    description: "Maximum number of meetings to return (max: 100)"
+                  },
+                  days_back: {
+                    type: "number",
+                    default: 180,
+                    description: "Number of days to look back from today (default: 180, max: 365)"
+                  },
+                  created_after: {
+                    type: "string",
+                    format: "date-time",
+                    description: "Filter meetings created after this date (ISO 8601 format). Overrides days_back if provided."
+                  },
+                  created_before: {
+                    type: "string",
+                    format: "date-time",
+                    description: "Filter meetings created before this date (ISO 8601 format)"
+                  },
+                  exclude_teams: {
+                    type: "array",
+                    items: { type: "string" },
+                    default: ["Executive", "Personal"],
+                    description: "Teams to exclude from results (default: ['Executive', 'Personal'])"
+                  },
+                  include_transcript: {
+                    type: "boolean",
+                    default: false,
+                    description: "Whether to include full transcripts (WARNING: Can be very large and slow)"
+                  },
+                  include_summary: {
+                    type: "boolean",
+                    default: true,
+                    description: "Whether to include meeting summaries"
+                  },
+                  include_action_items: {
+                    type: "boolean",
+                    default: true,
+                    description: "Whether to include action items"
                   },
                   calendar_invitees: {
                     type: "array",
@@ -170,57 +211,10 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                     items: { type: "string" },
                     description: "Filter by company domains"
                   },
-                  created_after: {
-                    type: "string",
-                    description: "Filter meetings created after this date (ISO 8601)"
-                  },
-                  created_before: {
-                    type: "string",
-                    description: "Filter meetings created before this date (ISO 8601)"
-                  },
-                  include_transcript: {
-                    type: "boolean",
-                    default: false,
-                    description: "Include meeting transcripts"
-                  },
-                  meeting_type: {
-                    type: "string",
-                    enum: ["all", "internal", "external"],
-                    default: "all",
-                    description: "Filter by meeting type"
-                  },
                   recorded_by: {
                     type: "array",
                     items: { type: "string" },
                     description: "Filter by meeting owner email addresses"
-                  },
-                  teams: {
-                    type: "array",
-                    items: { type: "string" },
-                    description: "Filter by team names"
-                  },
-                  limit: {
-                    type: "number",
-                    default: 50,
-                    description: "Maximum number of meetings to return"
-                  }
-                }
-              }
-            },
-            {
-              name: "search_meetings",
-              description: "Search for meetings containing keywords in titles, summaries, or action items. NOTE: Searches last 30 days only. For better performance, transcript search is disabled by default.",
-              inputSchema: {
-                type: "object",
-                properties: {
-                  search_term: {
-                    type: "string",
-                    description: "Search term to find in meeting titles, summaries, or action items"
-                  },
-                  include_transcript: {
-                    type: "boolean",
-                    default: false,
-                    description: "Whether to search within transcripts (WARNING: Currently disabled for performance)"
                   }
                 },
                 required: ["search_term"]
@@ -237,100 +231,88 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
       const { name, arguments: args } = params;
       
       try {
-        if (name === "list_meetings") {
-          // If search_term is provided, use search functionality instead
-          if (args.search_term) {
-            console.log(`Search term provided, using search functionality for: "${args.search_term}"`);
-            const meetings = await fathomClient.searchMeetings(args.search_term, args.include_transcript || false);
-            console.log(`Found ${meetings.length} matching meetings`);
-            
-            const formattedMeetings = meetings.map(meeting => ({
-              title: meeting.title || meeting.meeting_title,
-              date: meeting.scheduled_start_time || meeting.created_at,
-              url: meeting.share_url || meeting.url,
-              attendees: meeting.calendar_invitees,
-              recorded_by: meeting.recorded_by,
-              summary: meeting.default_summary,
-              action_items: meeting.action_items,
-              transcript: args.include_transcript ? meeting.transcript : undefined
-            }));
-            
-            const result = {
-              jsonrpc: '2.0',
-              id,
-              result: {
-                content: [{
-                  type: "text",
-                  text: JSON.stringify({
-                    search_term: args.search_term,
-                    total_found: meetings.length,
-                    meetings: formattedMeetings
-                  }, null, 2)
-                }]
-              }
-            };
-            res.json(result);
-            return;
+        if (name === "search_meetings") {
+          console.log(`Searching for: "${args.search_term}" with comprehensive filtering`);
+          
+          // Build API parameters with proper includes
+          const apiParams: any = {
+            include_summary: args.include_summary !== false, // Default to true
+            include_action_items: args.include_action_items !== false, // Default to true
+            include_transcript: args.include_transcript || false,
+            include_crm_matches: false // We don't need CRM data for search
+          };
+
+          // Handle date filtering
+          if (args.created_after) {
+            apiParams.created_after = args.created_after;
+          } else if (args.days_back) {
+            const daysBack = Math.min(args.days_back, 365); // Cap at 1 year
+            apiParams.created_after = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+          } else {
+            // Default to 180 days
+            apiParams.created_after = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString();
           }
-          
-          // Regular list_meetings functionality
-          const limit = args.limit || 50;
-          const { limit: _, ...apiParams } = args;
-          
-          console.log('Fetching meetings with params:', JSON.stringify(apiParams));
+
+          if (args.created_before) {
+            apiParams.created_before = args.created_before;
+          }
+
+          // Add other filters
+          if (args.calendar_invitees) apiParams.calendar_invitees = args.calendar_invitees;
+          if (args.calendar_invitees_domains) apiParams.calendar_invitees_domains = args.calendar_invitees_domains;
+          if (args.recorded_by) apiParams.recorded_by = args.recorded_by;
+
+          console.log('API params:', JSON.stringify(apiParams, null, 2));
+
+          // Get meetings from API with proper includes
           const response = await fathomClient.listMeetings(apiParams);
-          console.log(`Got ${response.items.length} meetings`);
-          const meetings = response.items.slice(0, limit);
-          
-          const formattedMeetings = meetings.map(meeting => ({
+          console.log(`Got ${response.items.length} meetings from API`);
+
+          // Filter out excluded teams
+          const excludeTeams = args.exclude_teams || ["Executive", "Personal"];
+          let filteredMeetings = response.items.filter(meeting => {
+            const recordedByTeam = meeting.recorded_by?.team;
+            const isExcluded = excludeTeams.some(team => 
+              recordedByTeam?.toLowerCase().includes(team.toLowerCase())
+            );
+            return !isExcluded;
+          });
+          console.log(`After team filtering: ${filteredMeetings.length} meetings`);
+
+          // Search within the filtered meetings
+          const searchLower = args.search_term.toLowerCase();
+          const matchingMeetings = filteredMeetings.filter(meeting => {
+            const titleMatch = meeting.title?.toLowerCase().includes(searchLower) ||
+                              meeting.meeting_title?.toLowerCase().includes(searchLower);
+            const summaryMatch = meeting.default_summary?.markdown_formatted?.toLowerCase().includes(searchLower);
+            const actionItemsMatch = meeting.action_items?.some(item => 
+              item.description?.toLowerCase().includes(searchLower)
+            );
+            const attendeeMatch = meeting.calendar_invitees?.some(attendee =>
+              attendee.name?.toLowerCase().includes(searchLower) ||
+              attendee.email?.toLowerCase().includes(searchLower)
+            );
+
+            return titleMatch || summaryMatch || actionItemsMatch || attendeeMatch;
+          });
+
+          console.log(`Found ${matchingMeetings.length} matching meetings`);
+
+          // Apply limit
+          const limit = Math.min(args.limit || 50, 100);
+          const limitedMeetings = matchingMeetings.slice(0, limit);
+
+          const formattedMeetings = limitedMeetings.map(meeting => ({
             title: meeting.title || meeting.meeting_title,
             date: meeting.scheduled_start_time || meeting.created_at,
             url: meeting.share_url || meeting.url,
             attendees: meeting.calendar_invitees,
             recorded_by: meeting.recorded_by,
-            summary: meeting.default_summary,
-            action_items: meeting.action_items,
+            summary: args.include_summary !== false ? meeting.default_summary : undefined,
+            action_items: args.include_action_items !== false ? meeting.action_items : undefined,
             transcript: args.include_transcript ? meeting.transcript : undefined
           }));
-          
-          const result = {
-            jsonrpc: '2.0',
-            id,
-            result: {
-              content: [{
-                type: "text",
-                text: JSON.stringify({
-                  total_found: response.items.length,
-                  showing: meetings.length,
-                  meetings: formattedMeetings,
-                  has_more: !!response.next_cursor
-                }, null, 2)
-              }]
-            }
-          };
-          res.json(result);
-          
-        } else if (name === "search_meetings") {
-          console.log(`Searching for: "${args.search_term}" (transcript=${args.include_transcript})`);
-          const meetings = await fathomClient.searchMeetings(
-            args.search_term, 
-            args.include_transcript
-          );
-          console.log(`Found ${meetings.length} matching meetings`);
-          
-          const formattedMeetings = meetings.map(meeting => ({
-            title: meeting.title || meeting.meeting_title,
-            date: meeting.scheduled_start_time || meeting.created_at,
-            url: meeting.share_url || meeting.url,
-            attendees: meeting.calendar_invitees,
-            recorded_by: meeting.recorded_by,
-            summary: meeting.default_summary,
-            action_items: meeting.action_items,
-            relevance: args.include_transcript && meeting.transcript?.toLowerCase().includes(args.search_term.toLowerCase()) 
-              ? "Found in transcript" 
-              : "Found in title/summary"
-          }));
-          
+
           const result = {
             jsonrpc: '2.0',
             id,
@@ -339,7 +321,16 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                 type: "text",
                 text: JSON.stringify({
                   search_term: args.search_term,
-                  total_found: meetings.length,
+                  total_found: matchingMeetings.length,
+                  showing: limitedMeetings.length,
+                  has_more: matchingMeetings.length > limit,
+                  filters_applied: {
+                    exclude_teams: excludeTeams,
+                    days_back: args.days_back || 180,
+                    include_summary: args.include_summary !== false,
+                    include_action_items: args.include_action_items !== false,
+                    include_transcript: args.include_transcript || false
+                  },
                   meetings: formattedMeetings
                 }, null, 2)
               }]

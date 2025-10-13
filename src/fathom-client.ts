@@ -57,10 +57,12 @@ export class FathomClient {
 
   async searchMeetings(searchTerm: string, includeTranscript: boolean = false): Promise<FathomMeeting[]> {
     // Search in the last 6 months to find more meetings
-    // Try to include summaries and action items
+    // Use proper API parameters to get summaries and action items
     const response = await this.listMeetings({
-      include_transcript: false,
-      include_crm_matches: true, // This might help get more data
+      include_transcript: includeTranscript,
+      include_summary: true, // This will get the summaries
+      include_action_items: true, // This will get the action items
+      include_crm_matches: false, // We don't need CRM data for search
       created_after: new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString() // Last 180 days (6 months)
     });
     
