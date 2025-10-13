@@ -31,7 +31,7 @@ const fathomClient = new FathomClient(apiKey);
 function authenticateSSE(req: express.Request, res: express.Response, next: express.NextFunction) {
   console.log('Authenticating MCP request...');
   console.log('Request method:', req.method);
-  console.log('Request body:', req.body);
+  // Note: Not logging request body to avoid exposing sensitive data
   
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
@@ -56,7 +56,7 @@ function authenticateSSE(req: express.Request, res: express.Response, next: expr
 
 // Handle MCP protocol requests directly
 async function handleMCPRequest(req: express.Request, res: express.Response) {
-  console.log('Handling MCP request:', req.body);
+  console.log('Handling MCP request (method:', req.body?.method || 'unknown', ')');
   
   try {
     // Note: We're using HTTP-based MCP protocol, so no server initialization needed
@@ -311,7 +311,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             console.log(`Got ${allMeetings.length} total meetings from API using pagination`);
           } else {
             // Single API call for general searches
-            const response = await fathomClient.listMeetings(apiParams);
+      const response = await fathomClient.listMeetings(apiParams);
             allMeetings = response.items;
             console.log(`Got ${allMeetings.length} meetings from API using native filters`);
           }
