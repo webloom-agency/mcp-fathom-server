@@ -180,13 +180,24 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
         if (name === "search_meetings") {
           console.log(`Filtering meetings with: "${args.search_term}" using native API filters`);
           
+          // Detect "last X" requests and adjust strategy
+          const searchTerm = args.search_term?.toLowerCase() || '';
+          const lastMatch = searchTerm.match(/last\s+(\d+)|derniers?\s+(\d+)/);
+          const requestedLastCount = lastMatch ? parseInt(lastMatch[1] || lastMatch[2]) : null;
+          
+          let isLastRequest = false;
+          if (requestedLastCount) {
+            isLastRequest = true;
+            console.log(`🔄 "Last ${requestedLastCount}" request detected - will fetch ALL matching meetings then return only the last ${requestedLastCount}`);
+          }
+          
           // Build API parameters with native filtering
           const apiParams: any = {
             include_summary: args.include_summary !== false, // Default to true
             include_action_items: args.include_action_items !== false, // Default to true
             include_transcript: args.include_transcript || false,
             include_crm_matches: false, // We don't need CRM data for search
-            limit: args.limit || 50
+            limit: 100 // High limit to get comprehensive results
           };
 
           // Handle date filtering
@@ -268,10 +279,42 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           console.log('API params:', JSON.stringify(apiParams, null, 2));
 
           // Get meetings from API using native filtering
-          const response = await fathomClient.listMeetings(apiParams);
-          const allMeetings = response.items;
+          // If we have specific filters (email, domain, etc.), fetch ALL results with pagination
+          const hasSpecificFilters = apiParams.calendar_invitees || apiParams.calendar_invitees_domains || apiParams.recorded_by;
           
-          console.log(`Got ${allMeetings.length} meetings from API using native filters`);
+          let allMeetings: any[] = [];
+          
+          if (hasSpecificFilters) {
+            // Fetch ALL meetings with pagination when we have specific filters
+            let cursor: string | undefined = undefined;
+            let totalFetched = 0;
+            const maxFetchLimit = 1000; // Reasonable upper limit
+            
+            console.log(`🔍 Specific filters detected - fetching ALL matching meetings with pagination`);
+            
+            do {
+              const currentParams = { ...apiParams, cursor };
+              const response = await fathomClient.listMeetings(currentParams);
+              allMeetings = allMeetings.concat(response.items);
+              totalFetched += response.items.length;
+              cursor = response.next_cursor;
+              
+              console.log(`Fetched ${response.items.length} meetings (total: ${totalFetched}), next_cursor: ${cursor}`);
+              
+              // Stop if we've reached a reasonable limit
+              if (totalFetched >= maxFetchLimit) {
+                console.log(`Reached maximum fetch limit of ${maxFetchLimit} meetings`);
+                break;
+              }
+            } while (cursor && totalFetched < maxFetchLimit);
+            
+            console.log(`Got ${allMeetings.length} total meetings from API using pagination`);
+          } else {
+            // Single API call for general searches
+            const response = await fathomClient.listMeetings(apiParams);
+            allMeetings = response.items;
+            console.log(`Got ${allMeetings.length} meetings from API using native filters`);
+          }
           
           // Debug: If we're filtering by calendar_invitees and got 0 results, let's see what emails are actually in the data
           if (apiParams.calendar_invitees && allMeetings.length === 0) {
@@ -363,11 +406,23 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
 
           console.log(`Found ${matchingMeetings.length} matching meetings out of ${filteredMeetings.length} total meetings`);
 
-          // Apply limit
-          const limit = Math.min(args.limit || 50, 100);
-          const limitedMeetings = matchingMeetings.slice(0, limit);
+          // Apply limit - handle "last X" requests specially
+          let finalMeetings;
+          let actualLimit;
+          
+          if (isLastRequest && requestedLastCount) {
+            // For "last X" requests, take the last X meetings (most recent)
+            finalMeetings = matchingMeetings.slice(-requestedLastCount);
+            actualLimit = requestedLastCount;
+            console.log(`🔄 Returning last ${requestedLastCount} meetings out of ${matchingMeetings.length} found`);
+          } else {
+            // Normal limit application
+            const limit = Math.min(args.limit || 50, 100);
+            finalMeetings = matchingMeetings.slice(0, limit);
+            actualLimit = limit;
+          }
 
-          const formattedMeetings = limitedMeetings.map(meeting => ({
+          const formattedMeetings = finalMeetings.map(meeting => ({
         title: meeting.title || meeting.meeting_title,
         date: meeting.scheduled_start_time || meeting.created_at,
         url: meeting.share_url || meeting.url,
@@ -387,8 +442,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           text: JSON.stringify({
                   search_term: args.search_term,
                   total_found: matchingMeetings.length,
-                  showing: limitedMeetings.length,
-                  has_more: matchingMeetings.length > limit,
+                  showing: finalMeetings.length,
+                  has_more: matchingMeetings.length > actualLimit,
                   filters_applied: {
                     exclude_teams: allExcludeTeams.filter(t => t),
                     days_back: args.days_back || 180,
