@@ -178,15 +178,15 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
       
       try {
         if (name === "search_meetings") {
-          console.log(`Searching for: "${args.search_term}" with comprehensive filtering`);
+          console.log(`Filtering meetings with: "${args.search_term}" using native API filters`);
           
-          // Build API parameters with proper includes
+          // Build API parameters with native filtering
           const apiParams: any = {
             include_summary: args.include_summary !== false, // Default to true
             include_action_items: args.include_action_items !== false, // Default to true
             include_transcript: args.include_transcript || false,
             include_crm_matches: false, // We don't need CRM data for search
-            limit: 100 // Set a high limit to get more meetings from API
+            limit: args.limit || 50
           };
 
           // Handle date filtering
@@ -206,36 +206,38 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             apiParams.created_before = args.created_before;
           }
 
-          // Add other filters
+          // Use search_term as native API filters
+          if (args.search_term) {
+            const searchTerm = args.search_term.toLowerCase();
+            
+            // If search term looks like an email domain, filter by domain
+            if (searchTerm.includes('.') && !searchTerm.includes(' ')) {
+              apiParams.calendar_invitees_domains = [searchTerm];
+              console.log(`Using search term as domain filter: ${searchTerm}`);
+            }
+            // If search term looks like a team name, filter by teams
+            else if (searchTerm.includes('team') || searchTerm.includes('department') || searchTerm.includes('group')) {
+              apiParams.teams = [searchTerm];
+              console.log(`Using search term as team filter: ${searchTerm}`);
+            }
+            // Otherwise, we'll need to do client-side filtering (unavoidable)
+            else {
+              console.log(`Search term "${searchTerm}" will be used for client-side filtering`);
+            }
+          }
+
+          // Add other explicit filters
           if (args.calendar_invitees) apiParams.calendar_invitees = args.calendar_invitees;
           if (args.calendar_invitees_domains) apiParams.calendar_invitees_domains = args.calendar_invitees_domains;
           if (args.recorded_by) apiParams.recorded_by = args.recorded_by;
 
           console.log('API params:', JSON.stringify(apiParams, null, 2));
 
-          // Get meetings from API with proper includes
-          let allMeetings: any[] = [];
-          let cursor: string | undefined = undefined;
-          let totalFetched = 0;
+          // Get meetings from API using native filtering
+          const response = await fathomClient.listMeetings(apiParams);
+          const allMeetings = response.items;
           
-          // Fetch meetings with pagination to get more results
-          do {
-            const currentParams = { ...apiParams, cursor };
-            const response = await fathomClient.listMeetings(currentParams);
-            allMeetings = allMeetings.concat(response.items);
-            totalFetched += response.items.length;
-            cursor = response.next_cursor;
-            
-            console.log(`Fetched ${response.items.length} meetings (total: ${totalFetched}), next_cursor: ${cursor}`);
-            
-            // Limit to prevent infinite loops - stop after fetching 500 meetings
-            if (totalFetched >= 500) {
-              console.log('Reached maximum fetch limit of 500 meetings');
-              break;
-            }
-          } while (cursor && totalFetched < 500);
-          
-          console.log(`Got ${allMeetings.length} total meetings from API (fetched in ${Math.ceil(totalFetched / 100)} pages)`);
+          console.log(`Got ${allMeetings.length} meetings from API using native filters`);
 
           // Filter out excluded teams
           const excludeTeams = args.exclude_teams || ["Executive", "Personal"];
