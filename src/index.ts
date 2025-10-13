@@ -98,6 +98,8 @@ function authenticateSSE(req: express.Request, res: express.Response, next: expr
 // Handle SSE connection setup
 async function handleSSEConnection(req: express.Request, res: express.Response) {
   console.log('New SSE connection established');
+  console.log('Request body:', req.body);
+  console.log('Request content-type:', req.headers['content-type']);
   
   try {
     // Create a new server instance for this connection
@@ -115,8 +117,6 @@ async function handleSSEConnection(req: express.Request, res: express.Response) 
     const transport = new SSEServerTransport('/sse', res);
     console.log('SSE transport created');
     
-    // Note: SSEServerTransport doesn't have an 'on' method for error handling
-    
     // Handle client disconnect
     req.on('close', () => {
       console.log('SSE connection closed');
@@ -132,15 +132,15 @@ async function handleSSEConnection(req: express.Request, res: express.Response) 
     await server.connect(transport);
     console.log('MCP Server connected to SSE transport successfully');
     
-    // Send initial SSE event to establish connection
-    console.log('Sending initial SSE event...');
-    res.write('data: {"type":"connected"}\n\n');
-    console.log('Initial SSE event sent');
+    // Keep the connection alive
+    console.log('SSE connection established and ready for MCP communication');
     
   } catch (error) {
     console.error('Failed to connect MCP server to SSE transport:', error);
     console.error('Error stack:', error instanceof Error ? error.stack : 'No stack trace');
-    res.end();
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to establish SSE connection' });
+    }
   }
 }
 
