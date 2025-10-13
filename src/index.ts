@@ -98,7 +98,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
   tools: [
     {
               name: "search_meetings",
-              description: "Search for Fathom meetings with comprehensive filtering. Can search by keywords in titles, summaries, action items, or attendees. Includes summaries, action items, and optional transcripts. Automatically excludes Executive and Personal teams.",
+              description: "Search for Fathom meetings with comprehensive filtering. Can search by keywords in titles, summaries, action items, or attendees. Includes summaries, action items, and optional transcripts. SECURITY: Automatically excludes Executive, Personal, No Team, and private calls (hardcoded for security).",
               inputSchema: {
                 type: "object",
                 properties: {
@@ -129,8 +129,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                   exclude_teams: {
                     type: "array",
                     items: { type: "string" },
-                    default: ["Executive", "Personal"],
-                    description: "Teams to exclude from results (default: ['Executive', 'Personal'])"
+                    default: [],
+                    description: "Additional teams to exclude from results. NOTE: Executive, Personal, No Team, and private calls are ALWAYS excluded for security (hardcoded)."
                   },
                   include_transcript: {
                     type: "boolean",
@@ -234,29 +234,42 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           console.log('API params:', JSON.stringify(apiParams, null, 2));
 
           // Get meetings from API using native filtering
-          const response = await fathomClient.listMeetings(apiParams);
+      const response = await fathomClient.listMeetings(apiParams);
           const allMeetings = response.items;
           
           console.log(`Got ${allMeetings.length} meetings from API using native filters`);
 
-          // Filter out excluded teams
-          const excludeTeams = args.exclude_teams || ["Executive", "Personal"];
-          console.log(`Excluding teams: ${excludeTeams.join(', ')}`);
+          // HARDCODED SECURITY FILTERING - Always exclude sensitive teams/calls
+          const hardcodedExcludeTeams = ["Executive", "Personal", "No Team", null, undefined];
+          const userExcludeTeams = args.exclude_teams || [];
+          const allExcludeTeams = [...new Set([...hardcodedExcludeTeams, ...userExcludeTeams])];
+          
+          console.log(`HARDCODED exclusions: Executive, Personal, No Team, null/undefined`);
+          console.log(`User exclusions: ${userExcludeTeams.join(', ') || 'none'}`);
+          console.log(`Total exclusions: ${allExcludeTeams.filter(t => t).join(', ')}`);
           
           let filteredMeetings = allMeetings.filter(meeting => {
             const recordedByTeam = meeting.recorded_by?.team;
-            const isExcluded = excludeTeams.some((team: string) => 
-              recordedByTeam?.toLowerCase().includes(team.toLowerCase())
-            );
+            
+            // Check if team should be excluded (case-insensitive)
+            const isExcluded = allExcludeTeams.some((team: string | null | undefined) => {
+              if (team === null || team === undefined) {
+                // Exclude meetings with null/undefined teams (private calls)
+                return recordedByTeam === null || recordedByTeam === undefined || recordedByTeam === '';
+              }
+              return recordedByTeam?.toLowerCase().includes(team.toLowerCase());
+            });
             
             // Debug logging for team filtering
             if (isExcluded) {
-              console.log(`Excluding meeting "${meeting.title || meeting.meeting_title}" - team: "${recordedByTeam}"`);
+              console.log(`🔒 SECURITY: Excluding sensitive meeting "${meeting.title || meeting.meeting_title}" - team: "${recordedByTeam}"`);
             }
             
             return !isExcluded;
           });
-          console.log(`After team filtering: ${filteredMeetings.length} meetings (excluded ${allMeetings.length - filteredMeetings.length})`);
+          
+          const excludedCount = allMeetings.length - filteredMeetings.length;
+          console.log(`🔒 SECURITY: After filtering: ${filteredMeetings.length} meetings (excluded ${excludedCount} sensitive meetings)`);
 
           // Search within the filtered meetings
           const searchLower = args.search_term.toLowerCase();
