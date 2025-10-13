@@ -72,13 +72,14 @@ function createMCPServer() {
   return server;
 }
 
-// Store active connections
-const activeConnections = new Map<string, { server: Server, transport: any }>();
+// Simple MCP server instance
+let mcpServer: Server | null = null;
 
-// Bearer token authentication middleware for SSE
+// Bearer token authentication middleware
 function authenticateSSE(req: express.Request, res: express.Response, next: express.NextFunction) {
-  console.log('Authenticating SSE request...');
+  console.log('Authenticating MCP request...');
   console.log('Request method:', req.method);
+  console.log('Request body:', req.body);
   
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
@@ -95,63 +96,242 @@ function authenticateSSE(req: express.Request, res: express.Response, next: expr
     return;
   }
 
-  console.log('Authentication successful, proceeding to SSE setup');
+  console.log('Authentication successful, handling MCP request');
   
-  // Let the MCP SDK handle all protocol messages automatically
-  handleSSEConnection(req, res);
+  // Handle MCP protocol messages directly
+  handleMCPRequest(req, res);
 }
 
-// Handle SSE connection setup - let MCP SDK handle everything
-async function handleSSEConnection(req: express.Request, res: express.Response) {
-  console.log('Handling SSE connection request');
-  console.log('Request method:', req.method);
+// Handle MCP protocol requests directly
+async function handleMCPRequest(req: express.Request, res: express.Response) {
+  console.log('Handling MCP request:', req.body);
   
   try {
-    // Create a new MCP server instance for this connection
-    console.log('Creating MCP server instance...');
-    const server = createMCPServer();
-    console.log('MCP server instance created');
+    // Initialize MCP server if not already done
+    if (!mcpServer) {
+      console.log('Creating MCP server instance...');
+      mcpServer = createMCPServer();
+      setupServerHandlers(mcpServer);
+      console.log('MCP server initialized');
+    }
     
-    // Set up the server handlers
-    console.log('Setting up server handlers...');
-    setupServerHandlers(server);
-    console.log('Server handlers set up');
+    const { method, params, id } = req.body;
     
-    // Create SSE transport - this will handle all MCP protocol automatically
-    console.log('Creating SSE transport...');
-    const transport = new SSEServerTransport('/sse', res);
-    console.log('SSE transport created');
-    
-    // Connect server to transport - this handles all protocol messages
-    console.log('Connecting server to transport...');
-    await server.connect(transport);
-    console.log('MCP Server connected to SSE transport successfully');
-    
-    // Store the connection for cleanup
-    const connectionId = `${req.ip}-${Date.now()}`;
-    activeConnections.set(connectionId, { server, transport });
-    
-    // Handle client disconnect
-    req.on('close', () => {
-      console.log('SSE connection closed, cleaning up...');
-      activeConnections.delete(connectionId);
-      transport.close();
-    });
-    
-    req.on('error', (error) => {
-      console.error('SSE connection error:', error);
-      activeConnections.delete(connectionId);
-      transport.close();
-    });
-    
-    console.log('SSE connection established and ready for MCP communication');
+    // Handle different MCP protocol messages
+    if (method === 'initialize') {
+      console.log('Handling initialize request');
+      const response = {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: {
+            tools: {},
+            resources: {},
+            prompts: {}
+          },
+          serverInfo: {
+            name: 'mcp-fathom-server',
+            version: '1.0.0'
+          }
+        }
+      };
+      console.log('Sending initialize response:', JSON.stringify(response, null, 2));
+      res.json(response);
+      
+    } else if (method === 'notifications/initialized') {
+      console.log('Handling initialized notification');
+      res.status(200).json({ status: 'ok' });
+      
+    } else if (method === 'tools/list') {
+      console.log('Handling tools/list request');
+      const response = {
+        jsonrpc: '2.0',
+        id,
+        result: {
+          tools: [
+            {
+              name: "list_meetings",
+              description: "List Fathom meetings with optional filters. Returns meeting titles, summaries, dates, and participants.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  calendar_invitees: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Filter by attendee email addresses"
+                  },
+                  calendar_invitees_domains: {
+                    type: "array", 
+                    items: { type: "string" },
+                    description: "Filter by company domains"
+                  },
+                  created_after: {
+                    type: "string",
+                    description: "Filter meetings created after this date (ISO 8601)"
+                  },
+                  created_before: {
+                    type: "string",
+                    description: "Filter meetings created before this date (ISO 8601)"
+                  },
+                  include_transcript: {
+                    type: "boolean",
+                    default: false,
+                    description: "Include meeting transcripts"
+                  },
+                  meeting_type: {
+                    type: "string",
+                    enum: ["all", "internal", "external"],
+                    default: "all",
+                    description: "Filter by meeting type"
+                  },
+                  recorded_by: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Filter by meeting owner email addresses"
+                  },
+                  teams: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Filter by team names"
+                  },
+                  limit: {
+                    type: "number",
+                    default: 50,
+                    description: "Maximum number of meetings to return"
+                  }
+                }
+              }
+            },
+            {
+              name: "search_meetings",
+              description: "Search for meetings containing keywords in titles, summaries, or action items. NOTE: Searches last 30 days only. For better performance, transcript search is disabled by default.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  search_term: {
+                    type: "string",
+                    description: "Search term to find in meeting titles, summaries, or action items"
+                  },
+                  include_transcript: {
+                    type: "boolean",
+                    default: false,
+                    description: "Whether to search within transcripts (WARNING: Currently disabled for performance)"
+                  }
+                },
+                required: ["search_term"]
+              }
+            }
+          ]
+        }
+      };
+      console.log('Sending tools/list response');
+      res.json(response);
+      
+    } else if (method === 'tools/call') {
+      console.log('Handling tools/call request:', params);
+      const { name, arguments: args } = params;
+      
+      try {
+        if (name === "list_meetings") {
+          const limit = args.limit || 50;
+          const { limit: _, ...apiParams } = args;
+          
+          console.log('Fetching meetings with params:', JSON.stringify(apiParams));
+          const response = await fathomClient.listMeetings(apiParams);
+          console.log(`Got ${response.items.length} meetings`);
+          const meetings = response.items.slice(0, limit);
+          
+          const formattedMeetings = meetings.map(meeting => ({
+            title: meeting.title || meeting.meeting_title,
+            date: meeting.scheduled_start_time || meeting.created_at,
+            url: meeting.share_url || meeting.url,
+            attendees: meeting.calendar_invitees,
+            recorded_by: meeting.recorded_by,
+            summary: meeting.default_summary,
+            action_items: meeting.action_items,
+            transcript: args.include_transcript ? meeting.transcript : undefined
+          }));
+          
+          const result = {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  total_found: response.items.length,
+                  showing: meetings.length,
+                  meetings: formattedMeetings,
+                  has_more: !!response.next_cursor
+                }, null, 2)
+              }]
+            }
+          };
+          res.json(result);
+          
+        } else if (name === "search_meetings") {
+          console.log(`Searching for: "${args.search_term}" (transcript=${args.include_transcript})`);
+          const meetings = await fathomClient.searchMeetings(
+            args.search_term, 
+            args.include_transcript
+          );
+          console.log(`Found ${meetings.length} matching meetings`);
+          
+          const formattedMeetings = meetings.map(meeting => ({
+            title: meeting.title || meeting.meeting_title,
+            date: meeting.scheduled_start_time || meeting.created_at,
+            url: meeting.share_url || meeting.url,
+            attendees: meeting.calendar_invitees,
+            recorded_by: meeting.recorded_by,
+            summary: meeting.default_summary,
+            action_items: meeting.action_items,
+            relevance: args.include_transcript && meeting.transcript?.toLowerCase().includes(args.search_term.toLowerCase()) 
+              ? "Found in transcript" 
+              : "Found in title/summary"
+          }));
+          
+          const result = {
+            jsonrpc: '2.0',
+            id,
+            result: {
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  search_term: args.search_term,
+                  total_found: meetings.length,
+                  meetings: formattedMeetings
+                }, null, 2)
+              }]
+            }
+          };
+          res.json(result);
+        } else {
+          throw new Error(`Unknown tool: ${name}`);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+        console.error(`Error in ${name}:`, errorMessage);
+        
+        const result = {
+          jsonrpc: '2.0',
+          id,
+          error: {
+            code: -32603,
+            message: errorMessage
+          }
+        };
+        res.json(result);
+      }
+      
+    } else {
+      console.log('Unknown MCP method:', method);
+      res.status(400).json({ error: `Unknown method: ${method}` });
+    }
     
   } catch (error) {
-    console.error('Failed to handle SSE connection:', error);
-    console.error('Error stack:', error instanceof Error ? error.stack : 'No stack trace');
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Failed to handle SSE connection' });
-    }
+    console.error('Failed to handle MCP request:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 }
 
@@ -326,11 +506,10 @@ async function main() {
     res.json({ status: 'ok', service: 'mcp-fathom-server' });
   });
 
-  // SSE endpoint with bearer token authentication
-  console.log('Setting up SSE routes...');
-  app.get('/sse', authenticateSSE);
+  // MCP endpoint with bearer token authentication
+  console.log('Setting up MCP routes...');
   app.post('/sse', authenticateSSE);
-  console.log('SSE routes set up');
+  console.log('MCP routes set up');
 
   console.log('Starting server...');
   const server = app.listen(port, () => {
