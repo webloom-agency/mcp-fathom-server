@@ -210,8 +210,13 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           if (args.search_term) {
             const searchTerm = args.search_term.toLowerCase();
             
-            // If search term looks like an email domain, filter by domain
-            if (searchTerm.includes('.') && !searchTerm.includes(' ')) {
+            // If search term looks like an email address (contains @), filter by email
+            if (searchTerm.includes('@')) {
+              apiParams.calendar_invitees = [searchTerm];
+              console.log(`Using search term as email filter: ${searchTerm}`);
+            }
+            // If search term looks like a domain (contains . but no @ and no spaces), filter by domain
+            else if (searchTerm.includes('.') && !searchTerm.includes('@') && !searchTerm.includes(' ')) {
               apiParams.calendar_invitees_domains = [searchTerm];
               console.log(`Using search term as domain filter: ${searchTerm}`);
             }
@@ -242,8 +247,14 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             );
             
             if (validEmails.length > 0) {
-              apiParams.calendar_invitees = validEmails;
-              console.log(`Using valid email filters: ${validEmails.join(', ')}`);
+              // If search_term already set calendar_invitees, merge them
+              if (apiParams.calendar_invitees) {
+                apiParams.calendar_invitees = [...new Set([...apiParams.calendar_invitees, ...validEmails])];
+                console.log(`Merged email filters: ${apiParams.calendar_invitees.join(', ')}`);
+              } else {
+                apiParams.calendar_invitees = validEmails;
+                console.log(`Using valid email filters: ${validEmails.join(', ')}`);
+              }
             }
             
             if (invalidEntries.length > 0) {
