@@ -74,16 +74,7 @@ function authenticateSSE(req: express.Request, res: express.Response, next: expr
 async function handleSSEConnection(req: express.Request, res: express.Response) {
   console.log('New SSE connection established');
   
-  // Set SSE headers
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Cache-Control'
-  });
-
-  // Create SSE transport
+  // Create SSE transport - it will handle headers internally
   const transport = new SSEServerTransport('/sse', res);
   
   try {
