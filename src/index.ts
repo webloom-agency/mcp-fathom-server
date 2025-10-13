@@ -185,7 +185,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             include_summary: args.include_summary !== false, // Default to true
             include_action_items: args.include_action_items !== false, // Default to true
             include_transcript: args.include_transcript || false,
-            include_crm_matches: false // We don't need CRM data for search
+            include_crm_matches: false, // We don't need CRM data for search
+            limit: 100 // Set a high limit to get more meetings from API
           };
 
           // Handle date filtering
@@ -227,6 +228,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
 
           // Search within the filtered meetings
           const searchLower = args.search_term.toLowerCase();
+          console.log(`Searching for "${searchLower}" in ${filteredMeetings.length} meetings`);
+          
           const matchingMeetings = filteredMeetings.filter(meeting => {
             const titleMatch = meeting.title?.toLowerCase().includes(searchLower) ||
                               meeting.meeting_title?.toLowerCase().includes(searchLower);
@@ -244,10 +247,17 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
               entry.text?.toLowerCase().includes(searchLower)
             );
 
-            return titleMatch || summaryMatch || actionItemsMatch || attendeeMatch || transcriptMatch;
+            const isMatch = titleMatch || summaryMatch || actionItemsMatch || attendeeMatch || transcriptMatch;
+            
+            // Debug logging for matches
+            if (isMatch) {
+              console.log(`Found match: "${meeting.title || meeting.meeting_title}" - title:${titleMatch}, summary:${summaryMatch}, actionItems:${actionItemsMatch}, attendee:${attendeeMatch}, transcript:${transcriptMatch}`);
+            }
+
+            return isMatch;
           });
 
-          console.log(`Found ${matchingMeetings.length} matching meetings`);
+          console.log(`Found ${matchingMeetings.length} matching meetings out of ${filteredMeetings.length} total meetings`);
 
           // Apply limit
           const limit = Math.min(args.limit || 50, 100);
