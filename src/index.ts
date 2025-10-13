@@ -214,14 +214,34 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           console.log('API params:', JSON.stringify(apiParams, null, 2));
 
           // Get meetings from API with proper includes
-      const response = await fathomClient.listMeetings(apiParams);
-          console.log(`Got ${response.items.length} meetings from API`);
+          let allMeetings: any[] = [];
+          let cursor: string | undefined = undefined;
+          let totalFetched = 0;
+          
+          // Fetch meetings with pagination to get more results
+          do {
+            const currentParams = { ...apiParams, cursor };
+            const response = await fathomClient.listMeetings(currentParams);
+            allMeetings = allMeetings.concat(response.items);
+            totalFetched += response.items.length;
+            cursor = response.next_cursor;
+            
+            console.log(`Fetched ${response.items.length} meetings (total: ${totalFetched}), next_cursor: ${cursor}`);
+            
+            // Limit to prevent infinite loops - stop after fetching 500 meetings
+            if (totalFetched >= 500) {
+              console.log('Reached maximum fetch limit of 500 meetings');
+              break;
+            }
+          } while (cursor && totalFetched < 500);
+          
+          console.log(`Got ${allMeetings.length} total meetings from API (fetched in ${Math.ceil(totalFetched / 100)} pages)`);
 
           // Filter out excluded teams
           const excludeTeams = args.exclude_teams || ["Executive", "Personal"];
           console.log(`Excluding teams: ${excludeTeams.join(', ')}`);
           
-          let filteredMeetings = response.items.filter(meeting => {
+          let filteredMeetings = allMeetings.filter(meeting => {
             const recordedByTeam = meeting.recorded_by?.team;
             const isExcluded = excludeTeams.some((team: string) => 
               recordedByTeam?.toLowerCase().includes(team.toLowerCase())
@@ -234,7 +254,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             
             return !isExcluded;
           });
-          console.log(`After team filtering: ${filteredMeetings.length} meetings (excluded ${response.items.length - filteredMeetings.length})`);
+          console.log(`After team filtering: ${filteredMeetings.length} meetings (excluded ${allMeetings.length - filteredMeetings.length})`);
 
           // Search within the filtered meetings
           const searchLower = args.search_term.toLowerCase();
