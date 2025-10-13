@@ -10,7 +10,9 @@ import {
   ListResourcesRequestSchema,
   ListPromptsRequestSchema,
   ListResourcesRequest,
-  ListPromptsRequest
+  ListPromptsRequest,
+  InitializeRequestSchema,
+  InitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -69,19 +71,26 @@ function createMCPServer() {
 
 // Bearer token authentication middleware for SSE
 function authenticateSSE(req: express.Request, res: express.Response, next: express.NextFunction) {
+  console.log('Authenticating SSE request...');
+  console.log('Request method:', req.method);
+  console.log('Request headers:', JSON.stringify(req.headers, null, 2));
+  
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
 
   if (!token) {
+    console.log('No token provided');
     res.status(401).json({ error: 'Access token required' });
     return;
   }
 
   if (token !== bearerToken) {
+    console.log('Invalid token provided');
     res.status(403).json({ error: 'Invalid access token' });
     return;
   }
 
+  console.log('Authentication successful, proceeding to SSE setup');
   // Don't call next() - we'll handle the SSE setup directly
   handleSSEConnection(req, res);
 }
@@ -90,32 +99,75 @@ function authenticateSSE(req: express.Request, res: express.Response, next: expr
 async function handleSSEConnection(req: express.Request, res: express.Response) {
   console.log('New SSE connection established');
   
-  // Create a new server instance for this connection
-  const server = createMCPServer();
-  
-  // Set up the server handlers
-  setupServerHandlers(server);
-  
-  // Create SSE transport - it will handle headers internally
-  const transport = new SSEServerTransport('/sse', res);
-  
   try {
+    // Create a new server instance for this connection
+    console.log('Creating new MCP server instance...');
+    const server = createMCPServer();
+    console.log('MCP server instance created');
+    
+    // Set up the server handlers
+    console.log('Setting up server handlers...');
+    setupServerHandlers(server);
+    console.log('Server handlers set up');
+    
+    // Create SSE transport - it will handle headers internally
+    console.log('Creating SSE transport...');
+    const transport = new SSEServerTransport('/sse', res);
+    console.log('SSE transport created');
+    
+    // Set up error handling before connecting
+    transport.on('error', (error) => {
+      console.error('SSE transport error:', error);
+    });
+    
+    // Handle client disconnect
+    req.on('close', () => {
+      console.log('SSE connection closed');
+      transport.close();
+    });
+    
+    req.on('error', (error) => {
+      console.error('SSE connection error:', error);
+      transport.close();
+    });
+    
+    console.log('Connecting server to transport...');
     await server.connect(transport);
-    console.log('MCP Server connected to SSE transport');
+    console.log('MCP Server connected to SSE transport successfully');
+    
+    // Send initial SSE event to establish connection
+    console.log('Sending initial SSE event...');
+    res.write('data: {"type":"connected"}\n\n');
+    console.log('Initial SSE event sent');
+    
   } catch (error) {
     console.error('Failed to connect MCP server to SSE transport:', error);
+    console.error('Error stack:', error instanceof Error ? error.stack : 'No stack trace');
     res.end();
   }
-
-  // Handle client disconnect
-  req.on('close', () => {
-    console.log('SSE connection closed');
-    transport.close();
-  });
 }
 
 // Set up server handlers
 function setupServerHandlers(server: Server) {
+  console.log('Setting up InitializeRequestSchema handler...');
+  server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequest) => {
+    console.log('Initialize request received:', JSON.stringify(request, null, 2));
+    return {
+      protocolVersion: "2024-11-05",
+      capabilities: {
+        tools: {},
+        resources: {},
+        prompts: {}
+      },
+      serverInfo: {
+        name: "mcp-fathom-server",
+        version: "1.0.0"
+      }
+    };
+  });
+  console.log('InitializeRequestSchema handler set up');
+
+  console.log('Setting up ListToolsRequestSchema handler...');
   server.setRequestHandler(ListToolsRequestSchema, async (request: ListToolsRequest) => ({
     tools: [
       {
@@ -130,16 +182,22 @@ function setupServerHandlers(server: Server) {
       }
     ]
   }));
+  console.log('ListToolsRequestSchema handler set up');
 
   // Add stub handlers for resources and prompts to prevent "Method not found" errors
+  console.log('Setting up ListResourcesRequestSchema handler...');
   server.setRequestHandler(ListResourcesRequestSchema, async (request: ListResourcesRequest) => ({
     resources: []
   }));
+  console.log('ListResourcesRequestSchema handler set up');
 
+  console.log('Setting up ListPromptsRequestSchema handler...');
   server.setRequestHandler(ListPromptsRequestSchema, async (request: ListPromptsRequest) => ({
     prompts: []
   }));
+  console.log('ListPromptsRequestSchema handler set up');
 
+  console.log('Setting up CallToolRequestSchema handler...');
   server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest) => {
     const { name, arguments: args } = request.params;
     
@@ -227,29 +285,44 @@ function setupServerHandlers(server: Server) {
       };
     }
   });
+  console.log('CallToolRequestSchema handler set up');
+  console.log('All server handlers set up successfully');
 }
 
 async function main() {
+  console.log('Starting Fathom MCP Server...');
+  console.log('Environment variables check:');
+  console.log('- FATHOM_API_KEY:', apiKey ? 'SET' : 'NOT SET');
+  console.log('- MCP_BEARER_TOKEN:', bearerToken ? 'SET' : 'NOT SET');
+  
   const app = express();
   const port = process.env.PORT || 3000;
+  console.log(`Using port: ${port}`);
 
   // Middleware
+  console.log('Setting up middleware...');
   app.use(cors());
   app.use(express.json());
+  console.log('Middleware set up');
 
   // Health check endpoint (no auth required)
   app.get('/health', (req, res) => {
+    console.log('Health check requested');
     res.json({ status: 'ok', service: 'mcp-fathom-server' });
   });
 
   // SSE endpoint with bearer token authentication
+  console.log('Setting up SSE routes...');
   app.get('/sse', authenticateSSE);
   app.post('/sse', authenticateSSE);
+  console.log('SSE routes set up');
 
+  console.log('Starting server...');
   app.listen(port, () => {
     console.log(`Fathom MCP Server running on port ${port}`);
     console.log(`SSE endpoint available at: http://localhost:${port}/sse`);
     console.log(`Health check available at: http://localhost:${port}/health`);
+    console.log('Server startup complete');
   });
 }
 
