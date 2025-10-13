@@ -25,24 +25,7 @@ if (!bearerToken) {
 
 const fathomClient = new FathomClient(apiKey);
 
-// Create a new MCP server instance for each connection
-function createMCPServer() {
-const server = new Server({
-  name: "mcp-fathom-server",
-  version: "1.0.0"
-}, {
-  capabilities: {
-    tools: {},
-    resources: {},
-    prompts: {}
-  }
-});
-
-  return server;
-}
-
-// Simple MCP server instance
-let mcpServer: Server | null = null;
+// Note: We're using HTTP-based MCP protocol, so no MCP server instance needed
 
 // Bearer token authentication middleware
 function authenticateSSE(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -76,13 +59,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
   console.log('Handling MCP request:', req.body);
   
   try {
-    // Initialize MCP server if not already done
-    if (!mcpServer) {
-      console.log('Creating MCP server instance...');
-      mcpServer = createMCPServer();
-      setupServerHandlers(mcpServer);
-      console.log('MCP server initialized');
-    }
+    // Note: We're using HTTP-based MCP protocol, so no server initialization needed
     
     const { method, params, id } = req.body;
     
