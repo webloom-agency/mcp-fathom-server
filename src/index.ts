@@ -94,7 +94,32 @@ function authenticateSSE(req: express.Request, res: express.Response, next: expr
   }
 
   console.log('Authentication successful, proceeding to SSE setup');
-  // Don't call next() - we'll handle the SSE setup directly
+  
+  // Handle POST requests with MCP initialization immediately
+  if (req.method === 'POST' && req.body && req.body.method === 'initialize') {
+    console.log('Handling MCP initialization request immediately...');
+    const response = {
+      jsonrpc: '2.0',
+      id: req.body.id,
+      result: {
+        protocolVersion: '2024-11-05',
+        capabilities: {
+          tools: {},
+          resources: {},
+          prompts: {}
+        },
+        serverInfo: {
+          name: 'mcp-fathom-server',
+          version: '1.0.0'
+        }
+      }
+    };
+    console.log('Sending MCP initialization response:', JSON.stringify(response, null, 2));
+    res.json(response);
+    return;
+  }
+  
+  // For GET requests or other POST requests, handle as SSE connection
   handleSSEConnection(req, res);
 }
 
@@ -130,6 +155,9 @@ async function handleSSEConnection(req: express.Request, res: express.Response) 
     console.log('Connecting server to transport...');
     await server.connect(transport);
     console.log('MCP Server connected to SSE transport successfully');
+    
+    // The SSE transport should handle MCP protocol messages automatically
+    // We just need to ensure the connection is established properly
     
     // Set up heartbeat to keep connection alive
     const heartbeat = setInterval(() => {
