@@ -115,10 +115,7 @@ async function handleSSEConnection(req: express.Request, res: express.Response) 
     const transport = new SSEServerTransport('/sse', res);
     console.log('SSE transport created');
     
-    // Set up error handling before connecting
-    transport.on('error', (error) => {
-      console.error('SSE transport error:', error);
-    });
+    // Note: SSEServerTransport doesn't have an 'on' method for error handling
     
     // Handle client disconnect
     req.on('close', () => {
