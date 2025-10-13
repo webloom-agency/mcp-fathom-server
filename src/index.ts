@@ -257,10 +257,35 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           console.log('API params:', JSON.stringify(apiParams, null, 2));
 
           // Get meetings from API using native filtering
-      const response = await fathomClient.listMeetings(apiParams);
+          const response = await fathomClient.listMeetings(apiParams);
           const allMeetings = response.items;
           
           console.log(`Got ${allMeetings.length} meetings from API using native filters`);
+          
+          // Debug: If we're filtering by calendar_invitees and got 0 results, let's see what emails are actually in the data
+          if (apiParams.calendar_invitees && allMeetings.length === 0) {
+            console.log(`🔍 DEBUG: No meetings found with calendar_invitees filter. Let's check what emails exist in recent meetings...`);
+            
+            // Fetch some recent meetings without the calendar_invitees filter to see what emails are actually there
+            const debugParams = { ...apiParams };
+            delete debugParams.calendar_invitees;
+            debugParams.limit = 10;
+            
+            const debugResponse = await fathomClient.listMeetings(debugParams);
+            console.log(`🔍 DEBUG: Found ${debugResponse.items.length} recent meetings without email filter`);
+            
+            // Show all unique emails from these meetings
+            const allEmails = new Set<string>();
+            debugResponse.items.forEach(meeting => {
+              meeting.calendar_invitees?.forEach((attendee: any) => {
+                if (attendee.email) {
+                  allEmails.add(attendee.email);
+                }
+              });
+            });
+            
+            console.log(`🔍 DEBUG: Unique emails found in recent meetings:`, Array.from(allEmails).slice(0, 20));
+          }
 
           // HARDCODED SECURITY FILTERING - Always exclude sensitive teams/calls
           const hardcodedExcludeTeams = ["Executive", "Personal", "No Team", null, undefined];
