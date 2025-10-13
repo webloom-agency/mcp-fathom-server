@@ -70,11 +70,11 @@ export class FathomClient {
     console.error(`[searchMeetings] Searching for "${searchTerm}" in ${response.items.length} meetings`);
     
     const filteredMeetings = response.items.filter(meeting => {
-      const titleMatch = meeting.title?.toLowerCase().includes(searchLower) || 
+      const titleMatch = meeting.title?.toLowerCase().includes(searchLower) ||
                         meeting.meeting_title?.toLowerCase().includes(searchLower);
-      const summaryMatch = meeting.default_summary?.toLowerCase().includes(searchLower);
-      const actionItemsMatch = meeting.action_items?.some(item => 
-        typeof item === 'string' && item.toLowerCase().includes(searchLower)
+      const summaryMatch = meeting.default_summary?.markdown_formatted?.toLowerCase().includes(searchLower);
+      const actionItemsMatch = meeting.action_items?.some(item =>
+        item.description?.toLowerCase().includes(searchLower)
       );
       
       // Debug logging for matches

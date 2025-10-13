@@ -272,7 +272,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           const excludeTeams = args.exclude_teams || ["Executive", "Personal"];
           let filteredMeetings = response.items.filter(meeting => {
             const recordedByTeam = meeting.recorded_by?.team;
-            const isExcluded = excludeTeams.some(team => 
+            const isExcluded = excludeTeams.some((team: string) => 
               recordedByTeam?.toLowerCase().includes(team.toLowerCase())
             );
             return !isExcluded;
@@ -293,7 +293,12 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
               attendee.email?.toLowerCase().includes(searchLower)
             );
 
-            return titleMatch || summaryMatch || actionItemsMatch || attendeeMatch;
+            // Search in transcript if available
+            const transcriptMatch = meeting.transcript?.some(entry =>
+              entry.text?.toLowerCase().includes(searchLower)
+            );
+
+            return titleMatch || summaryMatch || actionItemsMatch || attendeeMatch || transcriptMatch;
           });
 
           console.log(`Found ${matchingMeetings.length} matching meetings`);
