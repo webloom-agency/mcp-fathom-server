@@ -220,14 +220,37 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
               apiParams.teams = [searchTerm];
               console.log(`Using search term as team filter: ${searchTerm}`);
             }
+            // If search term looks like a person's name (firstname lastname), try to find their email
+            else if (searchTerm.includes(' ') && searchTerm.split(' ').length >= 2) {
+              console.log(`Search term "${searchTerm}" appears to be a person's name - will search in attendee names`);
+              // Don't add to API params, let client-side filtering handle it
+            }
             // Otherwise, we'll need to do client-side filtering (unavoidable)
             else {
               console.log(`Search term "${searchTerm}" will be used for client-side filtering`);
             }
           }
 
-          // Add other explicit filters
-          if (args.calendar_invitees) apiParams.calendar_invitees = args.calendar_invitees;
+          // Add other explicit filters, but validate calendar_invitees
+          if (args.calendar_invitees) {
+            // Filter out invalid entries (names instead of emails)
+            const validEmails = args.calendar_invitees.filter((email: string) => 
+              email.includes('@') && email.includes('.')
+            );
+            const invalidEntries = args.calendar_invitees.filter((email: string) => 
+              !email.includes('@') || !email.includes('.')
+            );
+            
+            if (validEmails.length > 0) {
+              apiParams.calendar_invitees = validEmails;
+              console.log(`Using valid email filters: ${validEmails.join(', ')}`);
+            }
+            
+            if (invalidEntries.length > 0) {
+              console.log(`⚠️  Ignoring invalid calendar_invitees (not emails): ${invalidEntries.join(', ')}`);
+              console.log(`💡 These will be searched in attendee names instead`);
+            }
+          }
           if (args.calendar_invitees_domains) apiParams.calendar_invitees_domains = args.calendar_invitees_domains;
           if (args.recorded_by) apiParams.recorded_by = args.recorded_by;
 
