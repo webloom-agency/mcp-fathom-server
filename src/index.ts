@@ -331,7 +331,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                   showing: limitedMeetings.length,
                   has_more: matchingMeetings.length > limit,
                   filters_applied: {
-                    exclude_teams: excludeTeams,
+                    exclude_teams: allExcludeTeams.filter(t => t),
                     days_back: args.days_back || 180,
                     include_summary: args.include_summary !== false,
                     include_action_items: args.include_action_items !== false,
