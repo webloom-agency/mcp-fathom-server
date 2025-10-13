@@ -34,14 +34,15 @@ export class FathomClient {
   }
 
   async searchMeetings(searchTerm: string, includeTranscript: boolean = false): Promise<FathomMeeting[]> {
-    // For now, just get recent meetings without transcripts for performance
-    // Transcripts can make responses over 1MB which is too slow
+    // Search in the last 6 months to find more meetings
     const response = await this.listMeetings({
       include_transcript: false,
-      created_after: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() // Last 30 days
+      created_after: new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString() // Last 180 days (6 months)
     });
     
     const searchLower = searchTerm.toLowerCase();
+    console.error(`[searchMeetings] Searching for "${searchTerm}" in ${response.items.length} meetings`);
+    
     const filteredMeetings = response.items.filter(meeting => {
       const titleMatch = meeting.title?.toLowerCase().includes(searchLower) || 
                         meeting.meeting_title?.toLowerCase().includes(searchLower);
@@ -50,8 +51,15 @@ export class FathomClient {
         typeof item === 'string' && item.toLowerCase().includes(searchLower)
       );
       
+      // Debug logging for matches
+      if (titleMatch || summaryMatch || actionItemsMatch) {
+        console.error(`[searchMeetings] Found match: "${meeting.title || meeting.meeting_title}" - title:${titleMatch}, summary:${summaryMatch}, actionItems:${actionItemsMatch}`);
+      }
+      
       return titleMatch || summaryMatch || actionItemsMatch;
     });
+    
+    console.error(`[searchMeetings] Found ${filteredMeetings.length} matching meetings`);
     
     // If we need transcripts, fetch them individually for just the matching meetings
     if (includeTranscript && filteredMeetings.length > 0 && filteredMeetings.length <= 5) {
