@@ -264,16 +264,16 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             const titleMatch = meeting.title?.toLowerCase().includes(searchLower) ||
                               meeting.meeting_title?.toLowerCase().includes(searchLower);
             const summaryMatch = meeting.default_summary?.markdown_formatted?.toLowerCase().includes(searchLower);
-            const actionItemsMatch = meeting.action_items?.some(item => 
+            const actionItemsMatch = meeting.action_items?.some((item: any) => 
               item.description?.toLowerCase().includes(searchLower)
             );
-            const attendeeMatch = meeting.calendar_invitees?.some(attendee =>
+            const attendeeMatch = meeting.calendar_invitees?.some((attendee: any) =>
               attendee.name?.toLowerCase().includes(searchLower) ||
               attendee.email?.toLowerCase().includes(searchLower)
             );
 
             // Search in transcript if available
-            const transcriptMatch = meeting.transcript?.some(entry =>
+            const transcriptMatch = meeting.transcript?.some((entry: any) =>
               entry.text?.toLowerCase().includes(searchLower)
             );
 
