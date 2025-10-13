@@ -230,6 +230,7 @@ async function main() {
 
   // SSE endpoint with bearer token authentication
   app.get('/sse', authenticateSSE);
+  app.post('/sse', authenticateSSE);
 
   app.listen(port, () => {
     console.log(`Fathom MCP Server running on port ${port}`);
