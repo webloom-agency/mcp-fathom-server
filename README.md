@@ -66,30 +66,30 @@ Configure your MCP client to connect to the server:
 
 ## Available Tools
 
-### list_meetings
-
-List Fathom meetings with optional filters.
-
-**Parameters:**
-- `calendar_invitees` (optional): Filter by attendee email addresses
-- `calendar_invitees_domains` (optional): Filter by company domains
-- `created_after` (optional): Filter meetings created after this date (ISO 8601)
-- `created_before` (optional): Filter meetings created before this date (ISO 8601)
-- `include_transcript` (optional): Include meeting transcripts (default: false)
-- `meeting_type` (optional): Filter by meeting type ('all', 'internal', 'external')
-- `recorded_by` (optional): Filter by meeting owner email addresses
-- `teams` (optional): Filter by team names
-- `limit` (optional): Maximum number of meetings to return (default: 50)
-
 ### search_meetings
 
-Search for meetings containing keywords in titles, summaries, or action items.
+Comprehensive search for Fathom meetings with advanced filtering and rich data retrieval. Can search by keywords in titles, summaries, action items, or attendees. Automatically excludes Executive and Personal teams.
 
 **Parameters:**
-- `search_term` (required): Search term to find in meeting content
-- `include_transcript` (optional): Whether to search within transcripts (default: false)
+- `search_term` (required): Search term to find in meeting titles, summaries, action items, or attendee names
+- `limit` (optional): Maximum number of meetings to return (default: 50, max: 100)
+- `days_back` (optional): Number of days to look back from today (default: 180, max: 365)
+- `created_after` (optional): Filter meetings created after this date (ISO 8601 format). Overrides days_back if provided.
+- `created_before` (optional): Filter meetings created before this date (ISO 8601 format)
+- `exclude_teams` (optional): Teams to exclude from results (default: ['Executive', 'Personal'])
+- `include_transcript` (optional): Whether to include full transcripts (default: false, WARNING: Can be very large and slow)
+- `include_summary` (optional): Whether to include meeting summaries (default: true)
+- `include_action_items` (optional): Whether to include action items (default: true)
+- `calendar_invitees` (optional): Filter by attendee email addresses
+- `calendar_invitees_domains` (optional): Filter by company domains
+- `recorded_by` (optional): Filter by meeting owner email addresses
 
-**Note:** Searches are limited to the last 30 days for performance.
+**Features:**
+- ✅ **Comprehensive search** across titles, summaries, action items, attendees, and transcripts
+- ✅ **Rich data retrieval** with summaries and action items included by default
+- ✅ **Smart team filtering** automatically excludes Executive and Personal meetings
+- ✅ **Flexible date filtering** with days back or specific date ranges
+- ✅ **High API limits** (up to 100 meetings) for better search coverage
 
 ## API Endpoints
 
