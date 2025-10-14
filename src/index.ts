@@ -191,6 +191,14 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             console.log(`🔄 "Last ${requestedLastCount}" request detected - will fetch ALL matching meetings then return only the last ${requestedLastCount}`);
           }
           
+          // Detect agent specification in search term (e.g., "caats.co" from @agent("caats.co"))
+          const agentMatch = searchTerm.match(/@agent\(["']?([^"')]+)["']?\)/);
+          const agentEmail = agentMatch ? agentMatch[1] : null;
+          
+          if (agentEmail) {
+            console.log(`🤖 Agent detected: ${agentEmail} - will use as email filter instead of keyword search`);
+          }
+          
           // Build API parameters with native filtering
           const apiParams: any = {
             include_summary: args.include_summary !== false, // Default to true
@@ -221,8 +229,19 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           if (args.search_term) {
             const searchTerm = args.search_term.toLowerCase();
             
+            // If agent email was detected, use it as email filter
+            if (agentEmail) {
+              if (agentEmail.includes('@')) {
+                apiParams.calendar_invitees = [agentEmail];
+                console.log(`🤖 Using agent email as filter: ${agentEmail}`);
+              } else {
+                // If agent is a domain, use domain filter
+                apiParams.calendar_invitees_domains = [agentEmail];
+                console.log(`🤖 Using agent domain as filter: ${agentEmail}`);
+              }
+            }
             // If search term looks like an email address (contains @), filter by email
-            if (searchTerm.includes('@')) {
+            else if (searchTerm.includes('@')) {
               apiParams.calendar_invitees = [searchTerm];
               console.log(`Using search term as email filter: ${searchTerm}`);
             }
