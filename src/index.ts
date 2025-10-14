@@ -443,11 +443,14 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           const excludedCount = allMeetings.length - filteredMeetings.length;
           console.log(`🔒 SECURITY: After filtering: ${filteredMeetings.length} meetings (excluded ${excludedCount} sensitive meetings)`);
 
-          // Search within the filtered meetings
-          const searchLower = args.search_term.toLowerCase();
-          console.log(`Searching for "${searchLower}" in ${filteredMeetings.length} meetings`);
+          // Search within the filtered meetings (only if we have a search term)
+          const searchLower = args.search_term?.toLowerCase() || '';
+          let matchingMeetings = filteredMeetings;
           
-          const matchingMeetings = filteredMeetings.filter(meeting => {
+          if (searchLower) {
+            console.log(`Searching for "${searchLower}" in ${filteredMeetings.length} meetings`);
+            
+            matchingMeetings = filteredMeetings.filter(meeting => {
             const titleMatch = meeting.title?.toLowerCase().includes(searchLower) ||
                               meeting.meeting_title?.toLowerCase().includes(searchLower);
             const summaryMatch = meeting.default_summary?.markdown_formatted?.toLowerCase().includes(searchLower);
@@ -473,6 +476,9 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
 
             return isMatch;
           });
+          } else {
+            console.log(`No search term provided - returning all ${filteredMeetings.length} filtered meetings`);
+          }
 
           console.log(`Found ${matchingMeetings.length} matching meetings out of ${filteredMeetings.length} total meetings`);
 
