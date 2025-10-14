@@ -266,8 +266,14 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             }
           }
 
-          // Add other explicit filters, but validate calendar_invitees
-          if (args.calendar_invitees) {
+          // Handle multiple calendar_invitees with separate API calls
+          let allMeetings: any[] = [];
+          let hasMultipleEmails = false;
+          
+          // Check if we have specific filters for pagination logic
+          const hasSpecificFilters = apiParams.calendar_invitees || apiParams.calendar_invitees_domains || apiParams.recorded_by;
+          
+          if (args.calendar_invitees && args.calendar_invitees.length > 0) {
             // Filter out invalid entries (names instead of emails)
             const validEmails = args.calendar_invitees.filter((email: string) => 
               email.includes('@') && email.includes('.')
@@ -276,20 +282,63 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
               !email.includes('@') || !email.includes('.')
             );
             
-            if (validEmails.length > 0) {
-              // If search_term already set calendar_invitees, merge them
-              if (apiParams.calendar_invitees) {
-                apiParams.calendar_invitees = [...new Set([...apiParams.calendar_invitees, ...validEmails])];
-                console.log(`Merged email filters: ${apiParams.calendar_invitees.join(', ')}`);
-              } else {
-                apiParams.calendar_invitees = validEmails;
-                console.log(`Using valid email filters: ${validEmails.join(', ')}`);
-              }
-            }
-            
             if (invalidEntries.length > 0) {
               console.log(`⚠️  Ignoring invalid calendar_invitees (not emails): ${invalidEntries.join(', ')}`);
               console.log(`💡 These will be searched in attendee names instead`);
+            }
+            
+            if (validEmails.length > 0) {
+              // Merge with any emails from search_term
+              const allEmails = apiParams.calendar_invitees ? 
+                [...new Set([...apiParams.calendar_invitees, ...validEmails])] : 
+                validEmails;
+              
+              if (allEmails.length > 1) {
+                hasMultipleEmails = true;
+                console.log(`🔄 Multiple emails detected (${allEmails.length}) - making separate API calls for each email to get ALL meetings`);
+                
+                // Make separate API calls for each email
+                for (const email of allEmails) {
+                  console.log(`📧 Fetching meetings for: ${email}`);
+                  const emailApiParams = { ...apiParams, calendar_invitees: [email] };
+                  
+                  let emailMeetings: any[] = [];
+                  if (hasSpecificFilters) {
+                    // Use pagination for this specific email
+                    let cursor: string | undefined = undefined;
+                    let totalFetched = 0;
+                    const maxFetchLimit = 1000;
+                    
+                    do {
+                      const response = await fathomClient.listMeetings({
+                        ...emailApiParams,
+                        cursor: cursor
+                      });
+                      emailMeetings = emailMeetings.concat(response.items);
+                      totalFetched += response.items.length;
+                      cursor = response.next_cursor;
+                      console.log(`📧 Fetched ${response.items.length} meetings for ${email} (total: ${totalFetched})`);
+                    } while (cursor && totalFetched < maxFetchLimit);
+                  } else {
+                    const response = await fathomClient.listMeetings(emailApiParams);
+                    emailMeetings = response.items;
+                    console.log(`📧 Fetched ${emailMeetings.length} meetings for ${email}`);
+                  }
+                  
+                  allMeetings = allMeetings.concat(emailMeetings);
+                }
+                
+                // Remove duplicates based on meeting ID
+                const uniqueMeetings = allMeetings.filter((meeting, index, self) => 
+                  index === self.findIndex(m => m.id === meeting.id)
+                );
+                allMeetings = uniqueMeetings;
+                console.log(`🔄 Combined ${allMeetings.length} unique meetings from ${allEmails.length} separate API calls`);
+              } else {
+                // Single email - use normal flow
+                apiParams.calendar_invitees = allEmails;
+                console.log(`Using explicit email filter: ${allEmails[0]}`);
+              }
             }
           }
           if (args.calendar_invitees_domains) apiParams.calendar_invitees_domains = args.calendar_invitees_domains;
@@ -299,40 +348,42 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
 
           // Get meetings from API using native filtering
           // If we have specific filters (email, domain, etc.), fetch ALL results with pagination
-          const hasSpecificFilters = apiParams.calendar_invitees || apiParams.calendar_invitees_domains || apiParams.recorded_by;
           
-          let allMeetings: any[] = [];
-          
-          if (hasSpecificFilters) {
-            // Fetch ALL meetings with pagination when we have specific filters
-            let cursor: string | undefined = undefined;
-            let totalFetched = 0;
-            const maxFetchLimit = 1000; // Reasonable upper limit
-            
-            console.log(`🔍 Specific filters detected - fetching ALL matching meetings with pagination`);
-            
-            do {
-              const currentParams = { ...apiParams, cursor };
-              const response = await fathomClient.listMeetings(currentParams);
-              allMeetings = allMeetings.concat(response.items);
-              totalFetched += response.items.length;
-              cursor = response.next_cursor;
+          // Skip main API call if we already have meetings from multiple email calls
+          if (!hasMultipleEmails) {
+            if (hasSpecificFilters) {
+              // Fetch ALL meetings with pagination when we have specific filters
+              let cursor: string | undefined = undefined;
+              let totalFetched = 0;
+              const maxFetchLimit = 1000; // Reasonable upper limit
               
-              console.log(`Fetched ${response.items.length} meetings (total: ${totalFetched}), next_cursor: ${cursor}`);
+              console.log(`🔍 Specific filters detected - fetching ALL matching meetings with pagination`);
               
-              // Stop if we've reached a reasonable limit
-              if (totalFetched >= maxFetchLimit) {
-                console.log(`Reached maximum fetch limit of ${maxFetchLimit} meetings`);
-                break;
-              }
-            } while (cursor && totalFetched < maxFetchLimit);
-            
-            console.log(`Got ${allMeetings.length} total meetings from API using pagination`);
-          } else {
-            // Single API call for general searches
+              do {
+                const currentParams = { ...apiParams, cursor };
+                const response = await fathomClient.listMeetings(currentParams);
+                allMeetings = allMeetings.concat(response.items);
+                totalFetched += response.items.length;
+                cursor = response.next_cursor;
+                
+                console.log(`Fetched ${response.items.length} meetings (total: ${totalFetched}), next_cursor: ${cursor}`);
+                
+                // Stop if we've reached a reasonable limit
+                if (totalFetched >= maxFetchLimit) {
+                  console.log(`Reached maximum fetch limit of ${maxFetchLimit} meetings`);
+                  break;
+                }
+              } while (cursor && totalFetched < maxFetchLimit);
+              
+              console.log(`Got ${allMeetings.length} total meetings from API using pagination`);
+            } else {
+              // Single API call for general searches
       const response = await fathomClient.listMeetings(apiParams);
-            allMeetings = response.items;
-            console.log(`Got ${allMeetings.length} meetings from API using native filters`);
+              allMeetings = response.items;
+              console.log(`Got ${allMeetings.length} meetings from API using native filters`);
+            }
+          } else {
+            console.log(`✅ Using meetings from separate email API calls (${allMeetings.length} total)`);
           }
           
           // Debug: If we're filtering by calendar_invitees and got 0 results, let's see what emails are actually in the data
