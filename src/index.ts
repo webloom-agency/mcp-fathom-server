@@ -226,31 +226,63 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           }
 
           // Use search_term as native API filters
+          let effectiveSearchTermGlobal: string | undefined = undefined;
           if (args.search_term) {
             const searchTerm = args.search_term.toLowerCase();
-            
-            // If agent email was detected, use it as email lookup
+            let effectiveSearchTerm = searchTerm;
+            let identityFiltersApplied = false;
+
+            // Heuristic 1: extract any email(s) present anywhere in the text
+            const emailRegex = /\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/gi;
+            const foundEmails: string[] = Array.from(new Set<string>(searchTerm.match(emailRegex) || []));
+
+            // Heuristic 2: extract any domain(s) present anywhere in the text (e.g., legalstart.fr)
+            const domainRegex = /\b([a-z0-9-]+\.[a-z]{2,})(?:\b|\s|\)|\]|"|')/gi;
+            const foundDomains: string[] = Array.from(new Set<string>((searchTerm.match(domainRegex) || []).map((d: string) => d.trim().replace(/[)\]"']$/, ''))));
+
+            // Prefer explicit @agent first
             if (agentEmail) {
               if (agentEmail.includes('@')) {
-                // Direct email address - use as exact match
                 apiParams.calendar_invitees = [agentEmail];
                 console.log(`🤖 Using agent email as exact filter: ${agentEmail}`);
+                effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(agentEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+                identityFiltersApplied = true;
               } else {
-                // Agent name/domain - use as domain filter to find emails from this domain
-                // This handles cases like "legalstart.fr" where we want to find emails from this domain
                 apiParams.calendar_invitees_domains = [agentEmail];
                 console.log(`🤖 Using agent name as domain filter: ${agentEmail}`);
+                effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(agentEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+                identityFiltersApplied = true;
               }
+            } else if (foundEmails.length > 0) {
+              // If any emails were found in free text, use them
+              apiParams.calendar_invitees = foundEmails;
+              console.log(`📧 Detected email(s) in query, filtering by emails:`, foundEmails);
+              foundEmails.forEach(email => {
+                effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+              });
+              identityFiltersApplied = true;
+            } else if (foundDomains.length > 0) {
+              // If any domains were found in free text, use them
+              apiParams.calendar_invitees_domains = foundDomains;
+              console.log(`🌐 Detected domain(s) in query, filtering by domains:`, foundDomains);
+              foundDomains.forEach(domain => {
+                effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(domain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+              });
+              identityFiltersApplied = true;
             }
             // If search term looks like an email address (contains @), filter by email
             else if (searchTerm.includes('@')) {
               apiParams.calendar_invitees = [searchTerm];
               console.log(`Using search term as email filter: ${searchTerm}`);
+              effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+              identityFiltersApplied = true;
             }
             // If search term looks like a domain (contains . but no @ and no spaces), filter by domain
             else if (searchTerm.includes('.') && !searchTerm.includes('@') && !searchTerm.includes(' ')) {
               apiParams.calendar_invitees_domains = [searchTerm];
               console.log(`Using search term as domain filter: ${searchTerm}`);
+              effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
+              identityFiltersApplied = true;
             }
             // If search term looks like a team name, filter by teams
             else if (searchTerm.includes('team') || searchTerm.includes('department') || searchTerm.includes('group')) {
@@ -266,6 +298,10 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             else {
               console.log(`Search term "${searchTerm}" will be used for client-side filtering`);
             }
+
+            // Normalize remaining free-text portion and expose it to later filtering
+            effectiveSearchTerm = effectiveSearchTerm.replace(/\s+/g, ' ').trim();
+            effectiveSearchTermGlobal = effectiveSearchTerm.length > 0 ? effectiveSearchTerm : undefined;
           }
 
           // Handle multiple calendar_invitees with separate API calls
@@ -449,24 +485,26 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           const searchLower = args.search_term?.toLowerCase() || '';
           let matchingMeetings = filteredMeetings;
           
-          if (searchLower) {
-            console.log(`Searching for "${searchLower}" in ${filteredMeetings.length} meetings`);
+          // Use the stripped free-text (if available) to avoid double-filtering by identity tokens
+          const freeText = effectiveSearchTermGlobal || searchLower;
+          if (freeText) {
+            console.log(`Searching for "${freeText}" in ${filteredMeetings.length} meetings`);
             
             matchingMeetings = filteredMeetings.filter(meeting => {
-            const titleMatch = meeting.title?.toLowerCase().includes(searchLower) ||
-                              meeting.meeting_title?.toLowerCase().includes(searchLower);
-            const summaryMatch = meeting.default_summary?.markdown_formatted?.toLowerCase().includes(searchLower);
+            const titleMatch = meeting.title?.toLowerCase().includes(freeText) ||
+                              meeting.meeting_title?.toLowerCase().includes(freeText);
+            const summaryMatch = meeting.default_summary?.markdown_formatted?.toLowerCase().includes(freeText);
             const actionItemsMatch = meeting.action_items?.some((item: any) => 
-              item.description?.toLowerCase().includes(searchLower)
+              item.description?.toLowerCase().includes(freeText)
             );
             const attendeeMatch = meeting.calendar_invitees?.some((attendee: any) =>
-              attendee.name?.toLowerCase().includes(searchLower) ||
-              attendee.email?.toLowerCase().includes(searchLower)
+              attendee.name?.toLowerCase().includes(freeText) ||
+              attendee.email?.toLowerCase().includes(freeText)
             );
 
             // Search in transcript if available
             const transcriptMatch = meeting.transcript?.some((entry: any) =>
-              entry.text?.toLowerCase().includes(searchLower)
+              entry.text?.toLowerCase().includes(freeText)
             );
 
             const isMatch = titleMatch || summaryMatch || actionItemsMatch || attendeeMatch || transcriptMatch;
