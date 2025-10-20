@@ -229,15 +229,17 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           if (args.search_term) {
             const searchTerm = args.search_term.toLowerCase();
             
-            // If agent email was detected, use it as email filter
+            // If agent email was detected, use it as email lookup
             if (agentEmail) {
               if (agentEmail.includes('@')) {
+                // Direct email address - use as exact match
                 apiParams.calendar_invitees = [agentEmail];
-                console.log(`🤖 Using agent email as filter: ${agentEmail}`);
+                console.log(`🤖 Using agent email as exact filter: ${agentEmail}`);
               } else {
-                // If agent is a domain, use domain filter
+                // Agent name/domain - use as domain filter to find emails from this domain
+                // This handles cases like "legalstart.fr" where we want to find emails from this domain
                 apiParams.calendar_invitees_domains = [agentEmail];
-                console.log(`🤖 Using agent domain as filter: ${agentEmail}`);
+                console.log(`🤖 Using agent name as domain filter: ${agentEmail}`);
               }
             }
             // If search term looks like an email address (contains @), filter by email
