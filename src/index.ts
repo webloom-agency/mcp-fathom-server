@@ -150,7 +150,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                   calendar_invitees: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Filter by attendee email addresses"
+                    description: "Filter by attendee email addresses (NOTE: Filtered client-side after Nov 13, 2024 due to API deprecation. For better performance, use calendar_invitees_domains when possible.)"
                   },
                   calendar_invitees_domains: {
                     type: "array", 
@@ -178,6 +178,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
       
       try {
         if (name === "search_meetings") {
+          // NOTE: calendar_invitees API parameter is deprecated by Fathom (disabled after Nov 13, 2024)
+          // We now use client-side filtering for emails and calendar_invitees_domains for API filtering
           console.log(`Filtering meetings with: "${args.search_term}" using native API filters`);
           
           // Detect "last X" requests and adjust strategy
@@ -225,6 +227,15 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             apiParams.created_before = args.created_before;
           }
 
+          // Track emails for client-side filtering (calendar_invitees API param is deprecated)
+          let emailsToFilter: string[] = [];
+          
+          // Helper function to extract domain from email
+          const extractDomain = (email: string): string | null => {
+            const match = email.match(/@([\w.-]+\.[a-z]{2,})/i);
+            return match ? match[1] : null;
+          };
+
           // Use search_term as native API filters
           let effectiveSearchTermGlobal: string | undefined = undefined;
           if (args.search_term) {
@@ -243,8 +254,17 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             // Prefer explicit @agent first
             if (agentEmail) {
               if (agentEmail.includes('@')) {
-                apiParams.calendar_invitees = [agentEmail];
-                console.log(`🤖 Using agent email as exact filter: ${agentEmail}`);
+                // Track email for client-side filtering (API param deprecated)
+                emailsToFilter.push(agentEmail);
+                // Try to use domain filter for better API performance
+                const domain = extractDomain(agentEmail);
+                if (domain) {
+                  if (!apiParams.calendar_invitees_domains) apiParams.calendar_invitees_domains = [];
+                  apiParams.calendar_invitees_domains.push(domain);
+                  console.log(`🤖 Using agent email ${agentEmail} - will filter by domain ${domain} (API) and email (client-side)`);
+                } else {
+                  console.log(`🤖 Using agent email ${agentEmail} - will filter client-side (no domain available)`);
+                }
                 effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(agentEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
                 identityFiltersApplied = true;
               } else {
@@ -254,9 +274,17 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                 identityFiltersApplied = true;
               }
             } else if (foundEmails.length > 0) {
-              // If any emails were found in free text, use them
-              apiParams.calendar_invitees = foundEmails;
-              console.log(`📧 Detected email(s) in query, filtering by emails:`, foundEmails);
+              // Track emails for client-side filtering
+              emailsToFilter.push(...foundEmails);
+              // Extract domains and use domain filter for better API performance
+              const domains = foundEmails.map(extractDomain).filter((d): d is string => d !== null);
+              if (domains.length > 0) {
+                if (!apiParams.calendar_invitees_domains) apiParams.calendar_invitees_domains = [];
+                apiParams.calendar_invitees_domains.push(...domains);
+                console.log(`📧 Detected email(s) in query: ${foundEmails.join(', ')} - using domain filter: ${domains.join(', ')} (API) and email filter (client-side)`);
+              } else {
+                console.log(`📧 Detected email(s) in query: ${foundEmails.join(', ')} - will filter client-side only`);
+              }
               foundEmails.forEach(email => {
                 effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
               });
@@ -272,8 +300,15 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             }
             // If search term looks like an email address (contains @), filter by email
             else if (searchTerm.includes('@')) {
-              apiParams.calendar_invitees = [searchTerm];
-              console.log(`Using search term as email filter: ${searchTerm}`);
+              emailsToFilter.push(searchTerm);
+              const domain = extractDomain(searchTerm);
+              if (domain) {
+                if (!apiParams.calendar_invitees_domains) apiParams.calendar_invitees_domains = [];
+                apiParams.calendar_invitees_domains.push(domain);
+                console.log(`Using search term as email filter: ${searchTerm} - using domain ${domain} (API) and email (client-side)`);
+              } else {
+                console.log(`Using search term as email filter: ${searchTerm} - will filter client-side`);
+              }
               effectiveSearchTerm = effectiveSearchTerm.replace(new RegExp(searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ');
               identityFiltersApplied = true;
             }
@@ -304,12 +339,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             effectiveSearchTermGlobal = effectiveSearchTerm.length > 0 ? effectiveSearchTerm : undefined;
           }
 
-          // Handle multiple calendar_invitees with separate API calls
+          // Handle explicit calendar_invitees parameter (NOTE: API param deprecated, will filter client-side)
           let allMeetings: any[] = [];
-          let hasMultipleEmails = false;
-          
-          // Check if we have specific filters for pagination logic
-          const hasSpecificFilters = apiParams.calendar_invitees || apiParams.calendar_invitees_domains || apiParams.recorded_by;
           
           if (args.calendar_invitees && args.calendar_invitees.length > 0) {
             // Filter out invalid entries (names instead of emails)
@@ -327,126 +358,88 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             
             if (validEmails.length > 0) {
               // Merge with any emails from search_term
-              const allEmails = apiParams.calendar_invitees ? 
-                [...new Set([...apiParams.calendar_invitees, ...validEmails])] : 
-                validEmails;
+              emailsToFilter = [...new Set([...emailsToFilter, ...validEmails])];
               
-              if (allEmails.length > 1) {
-                hasMultipleEmails = true;
-                console.log(`🔄 Multiple emails detected (${allEmails.length}) - making separate API calls for each email to get ALL meetings`);
-                
-                // Make separate API calls for each email
-                for (const email of allEmails) {
-                  console.log(`📧 Fetching meetings for: ${email}`);
-                  const emailApiParams = { ...apiParams, calendar_invitees: [email] };
-                  
-                  let emailMeetings: any[] = [];
-                  if (hasSpecificFilters) {
-                    // Use pagination for this specific email
-                    let cursor: string | undefined = undefined;
-                    let totalFetched = 0;
-                    const maxFetchLimit = 1000;
-                    
-                    do {
-                      const response = await fathomClient.listMeetings({
-                        ...emailApiParams,
-                        cursor: cursor
-                      });
-                      emailMeetings = emailMeetings.concat(response.items);
-                      totalFetched += response.items.length;
-                      cursor = response.next_cursor;
-                      console.log(`📧 Fetched ${response.items.length} meetings for ${email} (total: ${totalFetched})`);
-                    } while (cursor && totalFetched < maxFetchLimit);
-                  } else {
-                    const response = await fathomClient.listMeetings(emailApiParams);
-                    emailMeetings = response.items;
-                    console.log(`📧 Fetched ${emailMeetings.length} meetings for ${email}`);
-                  }
-                  
-                  allMeetings = allMeetings.concat(emailMeetings);
-                }
-                
-                // Remove duplicates based on meeting ID
-                const uniqueMeetings = allMeetings.filter((meeting, index, self) => 
-                  index === self.findIndex(m => m.id === meeting.id)
-                );
-                allMeetings = uniqueMeetings;
-                console.log(`🔄 Combined ${allMeetings.length} unique meetings from ${allEmails.length} separate API calls`);
+              // Extract domains from emails for API filtering (better performance)
+              const domains = validEmails.map(extractDomain).filter((d: string | null): d is string => d !== null);
+              if (domains.length > 0) {
+                if (!apiParams.calendar_invitees_domains) apiParams.calendar_invitees_domains = [];
+                apiParams.calendar_invitees_domains.push(...domains);
+                console.log(`📧 Using explicit calendar_invitees: ${validEmails.join(', ')} - will filter by domains ${domains.join(', ')} (API) and emails (client-side)`);
               } else {
-                // Single email - use normal flow
-                apiParams.calendar_invitees = allEmails;
-                console.log(`Using explicit email filter: ${allEmails[0]}`);
+                console.log(`📧 Using explicit calendar_invitees: ${validEmails.join(', ')} - will filter client-side only`);
               }
             }
           }
-          if (args.calendar_invitees_domains) apiParams.calendar_invitees_domains = args.calendar_invitees_domains;
-          if (args.recorded_by) apiParams.recorded_by = args.recorded_by;
-
-          console.log('API params:', JSON.stringify(apiParams, null, 2));
-
-          // Get meetings from API using native filtering
-          // If we have specific filters (email, domain, etc.), fetch ALL results with pagination
           
-          // Skip main API call if we already have meetings from multiple email calls
-          if (!hasMultipleEmails) {
-            if (hasSpecificFilters) {
-              // Fetch ALL meetings with pagination when we have specific filters
-              let cursor: string | undefined = undefined;
-              let totalFetched = 0;
-              const maxFetchLimit = 1000; // Reasonable upper limit
-              
-              console.log(`🔍 Specific filters detected - fetching ALL matching meetings with pagination`);
-              
-              do {
-                const currentParams = { ...apiParams, cursor };
-                const response = await fathomClient.listMeetings(currentParams);
-                allMeetings = allMeetings.concat(response.items);
-                totalFetched += response.items.length;
-                cursor = response.next_cursor;
-                
-                console.log(`Fetched ${response.items.length} meetings (total: ${totalFetched}), next_cursor: ${cursor}`);
-                
-                // Stop if we've reached a reasonable limit
-                if (totalFetched >= maxFetchLimit) {
-                  console.log(`Reached maximum fetch limit of ${maxFetchLimit} meetings`);
-                  break;
-                }
-              } while (cursor && totalFetched < maxFetchLimit);
-              
-              console.log(`Got ${allMeetings.length} total meetings from API using pagination`);
-            } else {
-              // Single API call for general searches
-      const response = await fathomClient.listMeetings(apiParams);
-              allMeetings = response.items;
-              console.log(`Got ${allMeetings.length} meetings from API using native filters`);
-            }
-          } else {
-            console.log(`✅ Using meetings from separate email API calls (${allMeetings.length} total)`);
+          // Deduplicate domains
+          if (apiParams.calendar_invitees_domains) {
+            apiParams.calendar_invitees_domains = [...new Set(apiParams.calendar_invitees_domains)];
           }
           
-          // Debug: If we're filtering by calendar_invitees and got 0 results, let's see what emails are actually in the data
-          if (apiParams.calendar_invitees && allMeetings.length === 0) {
-            console.log(`🔍 DEBUG: No meetings found with calendar_invitees filter. Let's check what emails exist in recent meetings...`);
+          if (args.calendar_invitees_domains) {
+            if (!apiParams.calendar_invitees_domains) apiParams.calendar_invitees_domains = [];
+            apiParams.calendar_invitees_domains.push(...args.calendar_invitees_domains);
+            apiParams.calendar_invitees_domains = [...new Set(apiParams.calendar_invitees_domains)];
+          }
+          if (args.recorded_by) apiParams.recorded_by = args.recorded_by;
+          
+          // Check if we have specific filters for pagination logic
+          const hasSpecificFilters = apiParams.calendar_invitees_domains || apiParams.recorded_by;
+
+          console.log('API params:', JSON.stringify(apiParams, null, 2));
+          if (emailsToFilter.length > 0) {
+            console.log(`📧 Emails to filter client-side: ${emailsToFilter.join(', ')}`);
+          }
+
+          // Get meetings from API using native filtering
+          // NOTE: calendar_invitees is no longer sent to API (deprecated), will filter client-side instead
+          // If we have specific filters (domain, recorded_by, etc.), fetch ALL results with pagination
+          
+          if (hasSpecificFilters) {
+            // Fetch ALL meetings with pagination when we have specific filters
+            let cursor: string | undefined = undefined;
+            let totalFetched = 0;
+            const maxFetchLimit = 1000; // Reasonable upper limit
             
-            // Fetch some recent meetings without the calendar_invitees filter to see what emails are actually there
-            const debugParams = { ...apiParams };
-            delete debugParams.calendar_invitees;
-            debugParams.limit = 10;
+            console.log(`🔍 Specific filters detected - fetching ALL matching meetings with pagination`);
             
-            const debugResponse = await fathomClient.listMeetings(debugParams);
-            console.log(`🔍 DEBUG: Found ${debugResponse.items.length} recent meetings without email filter`);
+            do {
+              const currentParams = { ...apiParams, cursor };
+              const response = await fathomClient.listMeetings(currentParams);
+              allMeetings = allMeetings.concat(response.items);
+              totalFetched += response.items.length;
+              cursor = response.next_cursor;
+              
+              console.log(`Fetched ${response.items.length} meetings (total: ${totalFetched}), next_cursor: ${cursor}`);
+              
+              // Stop if we've reached a reasonable limit
+              if (totalFetched >= maxFetchLimit) {
+                console.log(`Reached maximum fetch limit of ${maxFetchLimit} meetings`);
+                break;
+              }
+            } while (cursor && totalFetched < maxFetchLimit);
             
-            // Show all unique emails from these meetings
-            const allEmails = new Set<string>();
-            debugResponse.items.forEach(meeting => {
-              meeting.calendar_invitees?.forEach((attendee: any) => {
-                if (attendee.email) {
-                  allEmails.add(attendee.email);
-                }
-              });
+            console.log(`Got ${allMeetings.length} total meetings from API using pagination`);
+          } else {
+            // Single API call for general searches
+            const response = await fathomClient.listMeetings(apiParams);
+            allMeetings = response.items;
+            console.log(`Got ${allMeetings.length} meetings from API using native filters`);
+          }
+          
+          // Apply client-side filtering by email addresses (calendar_invitees API param is deprecated)
+          if (emailsToFilter.length > 0) {
+            const beforeFilterCount = allMeetings.length;
+            const emailsToFilterLower = emailsToFilter.map(e => e.toLowerCase());
+            allMeetings = allMeetings.filter(meeting => {
+              // Check if any attendee email matches
+              return meeting.calendar_invitees?.some((attendee: any) => {
+                const attendeeEmail = attendee.email?.toLowerCase();
+                return attendeeEmail && emailsToFilterLower.includes(attendeeEmail);
+              }) || false;
             });
-            
-            console.log(`🔍 DEBUG: Unique emails found in recent meetings:`, Array.from(allEmails).slice(0, 20));
+            console.log(`📧 Client-side email filtering: ${beforeFilterCount} → ${allMeetings.length} meetings (filtered by: ${emailsToFilter.join(', ')})`);
           }
 
           // HARDCODED SECURITY FILTERING - Always exclude sensitive teams/calls

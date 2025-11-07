@@ -103,9 +103,12 @@ export class FathomClient {
     
     const formatted: Record<string, any> = {};
     
-    if (params.calendar_invitees?.length) {
-      formatted['calendar_invitees[]'] = params.calendar_invitees;
-    }
+    // NOTE: calendar_invitees parameter is deprecated by Fathom API (disabled after Nov 13, 2024)
+    // We no longer send it to the API. Client-side filtering will be used instead.
+    // if (params.calendar_invitees?.length) {
+    //   formatted['calendar_invitees[]'] = params.calendar_invitees;
+    // }
+    
     if (params.calendar_invitees_domains?.length) {
       formatted['calendar_invitees_domains[]'] = params.calendar_invitees_domains;
     }
@@ -117,6 +120,7 @@ export class FathomClient {
     }
     
     Object.entries(params).forEach(([key, value]) => {
+      // Exclude calendar_invitees from API params (deprecated), but keep other calendar_invitees_domains
       if (!key.includes('calendar_invitees') && !key.includes('recorded_by') && !key.includes('teams') && value !== undefined) {
         formatted[key] = value;
       }
