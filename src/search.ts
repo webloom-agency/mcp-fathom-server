@@ -222,5 +222,43 @@ export function isSensitiveTeam(
   });
 }
 
-/** Default: exclude Executive/Personal only. Private / null-team calls are included. */
-export const DEFAULT_EXCLUDE_TEAMS = ["Executive", "Personal"];
+/** Host teams whose calls stay hidden unless shared_with is all_teams. */
+export const RESTRICTED_VISIBILITY_TEAMS = ["Executive", "Personal"];
+
+/** No default exclude_teams list — policy is visibility-based below. */
+export const DEFAULT_EXCLUDE_TEAMS: string[] = [];
+
+/**
+ * Visibility policy:
+ * - shared_with === "no_teams" → always hide (someone chose to hide the call),
+ *   unless includePrivate is true
+ * - Executive / Personal hosts → include ONLY when shared_with === "all_teams"
+ * - Every other host team → include for single_team / multiple_teams / all_teams
+ */
+export function shouldExcludeMeeting(
+  meeting: {
+    shared_with?: string | null;
+    recorded_by?: { team?: string | null } | null;
+  },
+  excludeTeams: Array<string | null | undefined>,
+  includePrivate: boolean = false
+): boolean {
+  const shared = meeting.shared_with;
+  const team = meeting.recorded_by?.team;
+
+  // Explicit "No Team Visibility" = voluntary hide for any host
+  if (shared === "no_teams") {
+    return !includePrivate;
+  }
+
+  // Sensitive hosts: only org-wide shares are searchable
+  if (isSensitiveTeam(team, RESTRICTED_VISIBILITY_TEAMS)) {
+    return shared !== "all_teams";
+  }
+
+  // All other teams: searchable at any non-private visibility
+  if (excludeTeams.length && isSensitiveTeam(team, excludeTeams)) {
+    return true;
+  }
+  return false;
+}

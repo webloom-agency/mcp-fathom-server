@@ -3,7 +3,7 @@
 import { FathomClient } from "./fathom-client.js";
 import {
   DEFAULT_EXCLUDE_TEAMS,
-  isSensitiveTeam,
+  shouldExcludeMeeting,
   meetingMatchesQuery,
   parseSearchQuery,
   type ParsedSearchQuery,
@@ -54,17 +54,18 @@ async function scanMeetingsForQuery(options: {
   apiParams: Record<string, unknown>;
   query: ParsedSearchQuery;
   excludeTeams: Array<string | null | undefined>;
-  excludePrivate: boolean;
+  includePrivate: boolean;
   matchTarget: number;
   maxScan: number;
 }) {
-  const { apiParams, query, excludeTeams, excludePrivate, matchTarget, maxScan } = options;
+  const { apiParams, query, excludeTeams, includePrivate, matchTarget, maxScan } = options;
 
   const matches: any[] = [];
   let cursor: string | undefined;
   let scanned = 0;
   let pages = 0;
   let skippedPrivate = 0;
+  let skippedRestricted = 0;
   let stoppedEarly = false;
 
   do {
@@ -74,9 +75,9 @@ async function scanMeetingsForQuery(options: {
     cursor = response.next_cursor || undefined;
 
     for (const meeting of response.items) {
-      if (isSensitiveTeam(meeting.recorded_by?.team, excludeTeams)) continue;
-      if (excludePrivate && isPrivateMeeting(meeting)) {
-        skippedPrivate += 1;
+      if (shouldExcludeMeeting(meeting, excludeTeams, includePrivate)) {
+        if (meeting.shared_with === "no_teams") skippedPrivate += 1;
+        else if (meeting.shared_with === "single_team") skippedRestricted += 1;
         continue;
       }
       if (meetingMatchesQuery(meeting, query)) {
@@ -85,7 +86,7 @@ async function scanMeetingsForQuery(options: {
     }
 
     console.log(
-      `Scan page ${pages}: scanned=${scanned} matches=${matches.length} private_skipped=${skippedPrivate} more=${Boolean(cursor)}`
+      `Scan page ${pages}: scanned=${scanned} matches=${matches.length} private_skipped=${skippedPrivate} restricted_skipped=${skippedRestricted} more=${Boolean(cursor)}`
     );
 
     if (matches.length >= matchTarget) {
@@ -110,6 +111,7 @@ async function scanMeetingsForQuery(options: {
     scanned,
     pages,
     skippedPrivate,
+    skippedRestricted,
     truncated: stoppedEarly || Boolean(cursor),
   };
 }
@@ -145,13 +147,6 @@ function maxScanForDaysBack(daysBack: number): number {
   return Math.min(400, Math.max(120, daysBack * 10));
 }
 
-function isPrivateMeeting(meeting: any): boolean {
-  if (meeting.shared_with === "no_teams") return true;
-  if (meeting.shared_with) return false; // single_team / multiple_teams / all_teams
-  const team = meeting.recorded_by?.team;
-  return team === null || team === undefined || team === "";
-}
-
 async function handleMCPRequest(req: express.Request, res: express.Response) {
   try {
     const { method, params, id } = req.body;
@@ -183,7 +178,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             {
               name: "search_meetings",
               description:
-                "Find Fathom meetings by company name, domain, email, or keyword in titles/attendees. IMPORTANT: Fathom has NO native text search — each call scans a date window page-by-page and can hit rate limits if days_back is large. ALWAYS set days_back from the user's timeframe: yesterday/this week/recent → 14; this month → 30; this quarter → 90; only use 180–365 when the user explicitly asks for older history. Start with a small window and widen only if zero results. Prefer search_term like 'arkema' or 'arkema.com' (do not combine huge days_back with include_transcript=true). Default days_back is 30. Private/1:1 meetings are INCLUDED by default. Excludes Executive/Personal teams only.",
+                "Find Fathom meetings by company/domain/email/keyword in titles/attendees. Fathom has no native text search — uses a bounded date scan. days_back: recent→14, month→30, quarter→90. Visibility: (1) No Team Visibility is always hidden (voluntary hide) unless include_private=true; (2) Executive/Personal hosts only appear when Visible to All Teams; (3) other teams appear for any non-private visibility.",
               inputSchema: {
                 type: "object",
                 properties: {
@@ -218,19 +213,20 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                     type: "array",
                     items: { type: "string" },
                     default: [],
-                    description: "Extra teams to exclude. Executive/Personal always excluded.",
+                    description:
+                      "Optional. Recorder home-team names to hide (e.g. ['Personal']). Empty by default — does NOT auto-exclude Executive. Meetings with shared_with=all_teams are never excluded by this.",
                   },
                   include_private: {
                     type: "boolean",
-                    default: true,
+                    default: false,
                     description:
-                      "Include private/1:1/unshared meetings (default true). Keep true for client searches. Set false only if the user explicitly wants team-shared calls only.",
+                      "Include meetings set to No Team Visibility. Default false — that setting means someone voluntarily hid the call.",
                   },
                   exclude_private: {
                     type: "boolean",
-                    default: false,
+                    default: true,
                     description:
-                      "Deprecated. Use include_private instead. If true, hides private meetings (overrides include_private).",
+                      "Deprecated. Prefer include_private. exclude_private=true hides No Team Visibility calls.",
                   },
                   include_transcript: {
                     type: "boolean",
@@ -342,27 +338,27 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           ...DEFAULT_EXCLUDE_TEAMS,
           ...(args.exclude_teams || []),
         ];
-        // Private/1:1 meetings included by default
+        // Default: hide No Team Visibility. Executive/Personal need All Teams (see shouldExcludeMeeting).
         const includePrivate =
-          args.exclude_private === true ? false : args.include_private !== false;
-        const excludePrivate = !includePrivate;
+          args.include_private === true ||
+          (args.exclude_private === false && args.include_private !== false);
 
         const maxScan = maxScanForDaysBack(daysBack ?? 30);
-        // Fetch a few extra matches so has_more is meaningful, then slice.
         const matchTarget = Math.min(actualLimit + 5, 50);
 
         console.log(
           `Search "${args.search_term}" query=${JSON.stringify(query)} days_back=${daysBack} limit=${actualLimit} maxScan=${maxScan} include_private=${includePrivate}`
         );
 
-        const { matches, scanned, pages, skippedPrivate, truncated } = await scanMeetingsForQuery({
-          apiParams,
-          query,
-          excludeTeams,
-          excludePrivate,
-          matchTarget,
-          maxScan,
-        });
+        const { matches, scanned, pages, skippedPrivate, skippedRestricted, truncated } =
+          await scanMeetingsForQuery({
+            apiParams,
+            query,
+            excludeTeams,
+            includePrivate,
+            matchTarget,
+            maxScan,
+          });
 
         const finalMeetings = matches.slice(0, actualLimit);
         const wantSummary = args.include_summary !== false;
@@ -378,6 +374,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           date: meeting.scheduled_start_time || meeting.created_at,
           url: meeting.share_url || meeting.url,
           recording_id: meeting.recording_id,
+          shared_with: meeting.shared_with,
           attendees: meeting.calendar_invitees,
           recorded_by: meeting.recorded_by,
           summary: wantSummary ? meeting.default_summary : undefined,
@@ -388,12 +385,17 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
         const hints: string[] = [];
         if (matches.length === 0 && truncated) {
           hints.push(
-            `Scanned ${scanned}/${maxScan} meetings in the window with no match (truncated). The hit may be further down a busy calendar — retry or widen days_back.`
+            `Scanned ${scanned}/${maxScan} meetings in the window with no match (truncated). Retry or widen days_back.`
           );
         }
-        if (matches.length === 0 && excludePrivate && skippedPrivate > 0) {
+        if (matches.length === 0 && !includePrivate && skippedPrivate > 0) {
           hints.push(
-            `Skipped ${skippedPrivate} private meetings because include_private=false. Retry with include_private=true for 1:1 client calls.`
+            `Skipped ${skippedPrivate} No Team Visibility calls. Set include_private=true if you need private/1:1s.`
+          );
+        }
+        if (matches.length === 0 && skippedRestricted > 0) {
+          hints.push(
+            `Skipped ${skippedRestricted} Executive/Personal-only shares. Set the call to Visible to All Teams in Fathom to include it.`
           );
         }
 
@@ -416,6 +418,7 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                       pages,
                       max_scan: maxScan,
                       private_skipped: skippedPrivate,
+                      restricted_skipped: skippedRestricted,
                       truncated,
                       note: "Fathom has no native text search; scan is a bounded lightweight list + client filter.",
                       hints,
@@ -423,7 +426,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                     filters_applied: {
                       exclude_teams: excludeTeams.filter((t) => t),
                       include_private: includePrivate,
-                      exclude_private: excludePrivate,
+                      visibility_policy:
+                        "Hide no_teams unless include_private. Executive/Personal: only all_teams. Other teams: any non-private visibility.",
                       days_back: daysBack ?? undefined,
                       include_summary: wantSummary,
                       include_action_items: args.include_action_items !== false,

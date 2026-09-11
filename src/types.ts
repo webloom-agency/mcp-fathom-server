@@ -10,6 +10,7 @@ export interface FathomMeeting {
   recording_start_time?: string;
   recording_end_time?: string;
   calendar_invitees_domains_type?: string;
+  shared_with?: "no_teams" | "single_team" | "multiple_teams" | "all_teams" | string;
   transcript_language?: string;
   transcript?: Array<{
     speaker: {
