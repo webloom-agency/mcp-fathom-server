@@ -1,16 +1,22 @@
 import axios, { AxiosInstance, AxiosError } from "axios";
-import { FathomListMeetingsParams, FathomListMeetingsResponse } from "./types.js";
+import {
+  FathomListMeetingsParams,
+  FathomListMeetingsResponse,
+  FathomMeeting,
+} from "./types.js";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export class FathomClient {
   private client: AxiosInstance;
-  private apiKey: string;
 
   constructor(apiKey: string) {
     if (!apiKey) {
       throw new Error("Fathom API key is required");
     }
 
-    this.apiKey = apiKey;
     this.client = axios.create({
       baseURL: "https://api.fathom.ai/external/v1",
       headers: {
@@ -19,7 +25,6 @@ export class FathomClient {
       },
       timeout: 60000,
       paramsSerializer: {
-        // Fathom expects repeated keys: recorded_by[]=a&recorded_by[]=b
         serialize: (params) => {
           const parts: string[] = [];
           for (const [key, value] of Object.entries(params)) {
@@ -40,25 +45,65 @@ export class FathomClient {
     });
   }
 
-  async listMeetings(params?: FathomListMeetingsParams & { cursor?: string; limit?: number }): Promise<FathomListMeetingsResponse> {
-    try {
-      const response = await this.client.get<FathomListMeetingsResponse>("/meetings", {
-        params: this.formatParams(params),
-      });
-      return response.data;
-    } catch (error) {
-      throw this.handleError(error);
+  /** GET with Retry-After handling for Fathom 429s (global 60/min, heavy 30/min). */
+  private async requestWithRetry<T>(
+    doRequest: () => Promise<{ data: T; headers: Record<string, unknown> }>,
+    maxRetries = 4
+  ): Promise<T> {
+    let attempt = 0;
+    while (true) {
+      try {
+        const response = await doRequest();
+        return response.data;
+      } catch (error) {
+        if (!(error instanceof AxiosError) || error.response?.status !== 429 || attempt >= maxRetries) {
+          throw this.handleError(error);
+        }
+
+        const retryAfterRaw = error.response.headers?.["retry-after"];
+        const retryAfterSec = retryAfterRaw ? Number(retryAfterRaw) : NaN;
+        const waitMs = Number.isFinite(retryAfterSec)
+          ? Math.max(retryAfterSec, 1) * 1000
+          : Math.min(15000, 2000 * Math.pow(2, attempt));
+
+        console.warn(`Fathom 429 — waiting ${waitMs}ms before retry ${attempt + 1}/${maxRetries}`);
+        await sleep(waitMs);
+        attempt += 1;
+      }
     }
   }
 
-  private formatParams(params?: FathomListMeetingsParams & { cursor?: string; limit?: number }): Record<string, any> {
+  async listMeetings(
+    params?: FathomListMeetingsParams & { cursor?: string; limit?: number }
+  ): Promise<FathomListMeetingsResponse> {
+    return this.requestWithRetry(() =>
+      this.client.get<FathomListMeetingsResponse>("/meetings", {
+        params: this.formatParams(params),
+      })
+    );
+  }
+
+  async getSummary(recordingId: number): Promise<FathomMeeting["default_summary"] | null> {
+    const data = await this.requestWithRetry<{
+      summary?: FathomMeeting["default_summary"];
+    }>(() => this.client.get(`/recordings/${recordingId}/summary`));
+    return data.summary ?? null;
+  }
+
+  async getTranscript(recordingId: number): Promise<FathomMeeting["transcript"] | null> {
+    const data = await this.requestWithRetry<{
+      transcript?: FathomMeeting["transcript"];
+    }>(() => this.client.get(`/recordings/${recordingId}/transcript`));
+    return data.transcript ?? null;
+  }
+
+  private formatParams(
+    params?: FathomListMeetingsParams & { cursor?: string; limit?: number }
+  ): Record<string, any> {
     if (!params) return {};
 
     const formatted: Record<string, any> = {};
 
-    // calendar_invitees is deprecated by Fathom (disabled after Nov 13, 2024) — never send it.
-    // calendar_invitees_domains filters by *associated company*, not invitee domains — only send
-    // when the caller explicitly opts into that (we no longer do so from search_meetings).
     if (params.calendar_invitees_domains?.length) {
       formatted["calendar_invitees_domains[]"] = params.calendar_invitees_domains;
     }
@@ -88,7 +133,12 @@ export class FathomClient {
   private handleError(error: unknown): Error {
     if (error instanceof AxiosError) {
       if (error.response?.status === 429) {
-        return new Error("Rate limit exceeded. Please try again later.");
+        const retryAfter = error.response.headers?.["retry-after"];
+        return new Error(
+          retryAfter
+            ? `Rate limit exceeded. Retry after ${retryAfter}s.`
+            : "Rate limit exceeded. Please try again later."
+        );
       }
       if (error.response?.status === 401) {
         return new Error("Invalid API key. Please check your Fathom API key.");

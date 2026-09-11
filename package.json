@@ -1,6 +1,6 @@
 {
   "name": "@petesena/mcp-fathom-server",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "MCP server for Fathom AI meeting API integration",
   "type": "module",
   "main": "dist/index.js",

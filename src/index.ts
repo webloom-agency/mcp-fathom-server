@@ -6,6 +6,7 @@ import {
   isSensitiveTeam,
   meetingMatchesQuery,
   parseSearchQuery,
+  type ParsedSearchQuery,
 } from "./search.js";
 import express from "express";
 import cors from "cors";
@@ -27,78 +28,139 @@ if (!bearerToken) {
 
 const fathomClient = new FathomClient(apiKey);
 
-function authenticateSSE(req: express.Request, res: express.Response, next: express.NextFunction) {
-  console.log("Authenticating MCP request...");
-  console.log("Request method:", req.method);
-
+function authenticateSSE(req: express.Request, res: express.Response, _next: express.NextFunction) {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
 
   if (!token) {
-    console.log("No token provided");
     res.status(401).json({ error: "Access token required" });
     return;
   }
 
   if (token !== bearerToken) {
-    console.log("Invalid token provided");
     res.status(403).json({ error: "Invalid access token" });
     return;
   }
 
-  console.log("Authentication successful, handling MCP request");
   handleMCPRequest(req, res);
 }
 
-async function fetchAllMeetings(apiParams: Record<string, unknown>, maxFetchLimit = 1000) {
-  let allMeetings: any[] = [];
-  let cursor: string | undefined = undefined;
-  let totalFetched = 0;
+/**
+ * Fathom has no native keyword search. We list meetings in a bounded date
+ * window (lightweight: no summary/transcript), match client-side, and stop
+ * as soon as we have enough hits. Summaries are fetched only for returned rows.
+ */
+async function scanMeetingsForQuery(options: {
+  apiParams: Record<string, unknown>;
+  query: ParsedSearchQuery;
+  excludeTeams: Array<string | null | undefined>;
+  matchTarget: number;
+  maxScan: number;
+}) {
+  const { apiParams, query, excludeTeams, matchTarget, maxScan } = options;
+
+  const matches: any[] = [];
+  let cursor: string | undefined;
+  let scanned = 0;
+  let pages = 0;
+  let stoppedEarly = false;
 
   do {
     const response = await fathomClient.listMeetings({ ...apiParams, cursor } as any);
-    allMeetings = allMeetings.concat(response.items);
-    totalFetched += response.items.length;
-    cursor = response.next_cursor;
-    console.log(`Fetched ${response.items.length} meetings (total: ${totalFetched}), next_cursor: ${cursor}`);
+    pages += 1;
+    scanned += response.items.length;
+    cursor = response.next_cursor || undefined;
 
-    if (totalFetched >= maxFetchLimit) {
-      console.log(`Reached maximum fetch limit of ${maxFetchLimit} meetings`);
+    for (const meeting of response.items) {
+      if (isSensitiveTeam(meeting.recorded_by?.team, excludeTeams)) continue;
+      if (meetingMatchesQuery(meeting, query)) {
+        matches.push(meeting);
+      }
+    }
+
+    console.log(
+      `Scan page ${pages}: scanned=${scanned} matches=${matches.length} more=${Boolean(cursor)}`
+    );
+
+    if (matches.length >= matchTarget) {
+      stoppedEarly = true;
       break;
     }
-  } while (cursor && totalFetched < maxFetchLimit);
+    if (scanned >= maxScan) {
+      stoppedEarly = true;
+      console.log(`Hit maxScan=${maxScan}`);
+      break;
+    }
+  } while (cursor);
 
-  return allMeetings;
+  matches.sort((a, b) => {
+    const da = new Date(a.scheduled_start_time || a.created_at || 0).getTime();
+    const db = new Date(b.scheduled_start_time || b.created_at || 0).getTime();
+    return db - da;
+  });
+
+  return {
+    matches,
+    scanned,
+    pages,
+    truncated: stoppedEarly || Boolean(cursor),
+  };
+}
+
+async function enrichMeetings(
+  meetings: any[],
+  opts: { includeSummary: boolean; includeTranscript: boolean }
+) {
+  const enriched = [];
+  for (const meeting of meetings) {
+    const copy = { ...meeting };
+    try {
+      if (opts.includeSummary && meeting.recording_id && !meeting.default_summary) {
+        copy.default_summary = await fathomClient.getSummary(meeting.recording_id);
+      }
+      if (opts.includeTranscript && meeting.recording_id) {
+        copy.transcript = await fathomClient.getTranscript(meeting.recording_id);
+      }
+    } catch (err) {
+      console.warn(
+        `Enrichment failed for recording ${meeting.recording_id}:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+    enriched.push(copy);
+  }
+  return enriched;
+}
+
+/** Cap how many lightweight list pages we walk for a given window. */
+function maxScanForDaysBack(daysBack: number): number {
+  // ~2–3 meetings/day upper bound for an agency; keep API calls modest.
+  return Math.min(250, Math.max(40, daysBack * 2));
 }
 
 async function handleMCPRequest(req: express.Request, res: express.Response) {
-  console.log("Handling MCP request (method:", req.body?.method || "unknown", ")");
-
   try {
     const { method, params, id } = req.body;
 
     if (method === "initialize") {
-      console.log("Handling initialize request");
       res.json({
         jsonrpc: "2.0",
         id,
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {}, resources: {}, prompts: {} },
-          serverInfo: { name: "mcp-fathom-server", version: "1.1.0" },
+          serverInfo: { name: "mcp-fathom-server", version: "1.2.0" },
         },
       });
       return;
     }
 
     if (method === "notifications/initialized") {
-      console.log("Handling initialized notification");
       res.status(200).json({ status: "ok" });
       return;
     }
 
     if (method === "tools/list") {
-      console.log("Handling tools/list request");
       res.json({
         jsonrpc: "2.0",
         id,
@@ -107,78 +169,81 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
             {
               name: "search_meetings",
               description:
-                "Search Fathom meetings by keyword, company name, domain, or attendee email. Matches titles, attendees, summaries, action items, and transcripts client-side (does not rely on Fathom company association, which is often incomplete). Excludes Executive and Personal teams by default.",
+                "Find Fathom meetings by company name, domain, email, or keyword in titles/attendees. IMPORTANT: Fathom has NO native text search — each call scans a date window page-by-page and can hit rate limits if days_back is large. ALWAYS set days_back from the user's timeframe: yesterday/this week/recent → 14; this month → 30; this quarter → 90; only use 180–365 when the user explicitly asks for older history. Start with a small window and widen only if zero results. Prefer search_term like 'arkema' or 'arkema.com' (do not combine huge days_back with include_transcript=true). Default days_back is 30. Excludes Executive/Personal teams.",
               inputSchema: {
                 type: "object",
                 properties: {
                   search_term: {
                     type: "string",
                     description:
-                      "Keyword, company name, domain (e.g. arkema.com), or email. Multi-word queries use AND matching across title/attendees/summary.",
+                      "Company, domain (arkema.com), email, or keyword. Example: 'arkema' or 'cecile.dourthe@arkema.com'. Multi-word = AND on title/attendees.",
                   },
                   limit: {
                     type: "number",
-                    default: 50,
-                    description: "Maximum number of meetings to return (max: 100)",
+                    default: 10,
+                    description:
+                      "Max meetings to return (default 10, max 50). Use 5–10 unless the user wants many results.",
                   },
                   days_back: {
                     type: "number",
-                    default: 180,
-                    description: "Days to look back from today (default: 180, max: 365)",
+                    default: 30,
+                    description:
+                      "REQUIRED TO CHOOSE INTENTIONALLY. Days to scan (default 30, max 365). Rules: recent/yesterday/last week → 14; this month → 30; older → 90; full year ONLY if user asks. Large values = more API calls and rate-limit risk.",
                   },
                   created_after: {
                     type: "string",
                     format: "date-time",
-                    description: "ISO 8601 lower bound. Overrides days_back if provided.",
+                    description: "ISO lower bound; overrides days_back when you know an exact start date.",
                   },
                   created_before: {
                     type: "string",
                     format: "date-time",
-                    description: "ISO 8601 upper bound",
+                    description: "ISO upper bound",
                   },
                   exclude_teams: {
                     type: "array",
                     items: { type: "string" },
                     default: [],
-                    description:
-                      "Additional teams to exclude. Executive and Personal are always excluded. Private/null-team calls are included by default.",
+                    description: "Extra teams to exclude. Executive/Personal always excluded.",
                   },
                   exclude_private: {
                     type: "boolean",
                     default: false,
-                    description: "If true, also exclude meetings with no team (private / unshared).",
+                    description: "Exclude meetings with no team.",
                   },
                   include_transcript: {
                     type: "boolean",
                     default: false,
-                    description: "Include full transcripts (can be large/slow)",
+                    description:
+                      "Fetch transcripts ONLY for returned hits. Default false. Heavy/rate-limited — set true only when the user needs exact quotes.",
                   },
                   include_summary: {
                     type: "boolean",
                     default: true,
-                    description: "Include meeting summaries",
+                    description:
+                      "Fetch summaries only for returned hits (1 heavy call per hit). Keep true for analysis; set false for a cheap existence check.",
                   },
                   include_action_items: {
                     type: "boolean",
                     default: true,
-                    description: "Include action items",
+                    description: "Include action items from the list scan (not a heavy request).",
                   },
                   calendar_invitees: {
                     type: "array",
                     items: { type: "string" },
                     description:
-                      "Filter by attendee email (client-side). Also matches emails appearing in the meeting title.",
+                      "Optional attendee emails. Prefer putting the company/domain in search_term first; add email if known.",
                   },
                   calendar_invitees_domains: {
                     type: "array",
                     items: { type: "string" },
                     description:
-                      "Filter by invitee email domain client-side (e.g. arkema.com). Does NOT use Fathom's company-association API filter.",
+                      "Optional invitee domains (client-side). Usually redundant if search_term is already 'arkema.com'.",
                   },
                   recorded_by: {
                     type: "array",
                     items: { type: "string" },
-                    description: "Filter by meeting owner email addresses (API filter)",
+                    description: "Recorder emails — native API filter; use when you know who recorded.",
                   },
                 },
                 required: ["search_term"],
@@ -191,7 +256,6 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
     }
 
     if (method === "tools/call") {
-      console.log("Handling tools/call request:", params);
       const { name, arguments: args } = params;
 
       try {
@@ -199,16 +263,10 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           throw new Error(`Unknown tool: ${name}`);
         }
 
-        console.log(`Searching meetings for: "${args.search_term}"`);
-
         const rawSearchTerm = args.search_term?.toLowerCase() || "";
         const lastMatch = rawSearchTerm.match(/last\s+(\d+)|derniers?\s+(\d+)/);
         const requestedLastCount = lastMatch ? parseInt(lastMatch[1] || lastMatch[2]) : null;
         const isLastRequest = !!requestedLastCount;
-
-        if (isLastRequest) {
-          console.log(`"Last ${requestedLastCount}" request — will return only the most recent ${requestedLastCount}`);
-        }
 
         const agentMatch = rawSearchTerm.match(/@agent\(["']?([^"')]+)["']?\)/);
         const agentToken = agentMatch ? agentMatch[1] : null;
@@ -219,9 +277,6 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
         const invalidInvitees = (args.calendar_invitees || []).filter(
           (email: string) => !email.includes("@") || !email.includes(".")
         );
-        if (invalidInvitees.length > 0) {
-          console.log(`Ignoring invalid calendar_invitees (not emails): ${invalidInvitees.join(", ")}`);
-        }
 
         const query = parseSearchQuery(
           args.search_term,
@@ -230,96 +285,79 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
           agentToken
         );
 
-        // If invalid invitee entries look like names, fold them into keywords
         if (invalidInvitees.length > 0) {
           const nameQuery = parseSearchQuery(invalidInvitees.join(" "));
           query.keywords = [...new Set([...query.keywords, ...nameQuery.keywords])];
         }
 
-        console.log("Parsed search query:", JSON.stringify(query));
+        const daysBack = args.created_after
+          ? null
+          : Math.min(Math.max(args.days_back ?? 30, 1), 365);
+        const actualLimit = Math.min(
+          isLastRequest && requestedLastCount ? requestedLastCount : args.limit || 10,
+          50
+        );
 
+        // Lightweight list only — summaries/transcripts are heavy (≤30/min).
         const apiParams: Record<string, unknown> = {
-          include_summary: args.include_summary !== false,
+          include_summary: false,
+          include_transcript: false,
           include_action_items: args.include_action_items !== false,
-          include_transcript: args.include_transcript || false,
           include_crm_matches: false,
         };
 
-        // NOTE: Do NOT pass calendar_invitees_domains to the Fathom API.
-        // That param filters by associated company (often empty/wrong), not invitee domains.
-        if (args.recorded_by) {
-          apiParams.recorded_by = args.recorded_by;
-        }
+        if (args.recorded_by) apiParams.recorded_by = args.recorded_by;
 
         if (args.created_after) {
           apiParams.created_after = args.created_after;
         } else {
-          const daysBack = Math.min(args.days_back || 180, 365);
-          apiParams.created_after = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
-          console.log(`Date filter: looking back ${daysBack} days`);
+          apiParams.created_after = new Date(
+            Date.now() - (daysBack as number) * 24 * 60 * 60 * 1000
+          ).toISOString();
         }
-
-        if (args.created_before) {
-          apiParams.created_before = args.created_before;
-        }
-
-        console.log("API params:", JSON.stringify(apiParams, null, 2));
-
-        // Always paginate — keyword/domain matching is client-side
-        const allMeetings = await fetchAllMeetings(apiParams);
-        console.log(`Got ${allMeetings.length} meetings from API`);
+        if (args.created_before) apiParams.created_before = args.created_before;
 
         const excludeTeams: Array<string | null | undefined> = [
           ...DEFAULT_EXCLUDE_TEAMS,
           ...(args.exclude_teams || []),
         ];
-        if (args.exclude_private) {
-          excludeTeams.push(null, undefined);
-        }
+        if (args.exclude_private) excludeTeams.push(null, undefined);
 
-        const afterSecurity = allMeetings.filter((meeting) => {
-          const excluded = isSensitiveTeam(meeting.recorded_by?.team, excludeTeams);
-          if (excluded) {
-            console.log(
-              `Excluding sensitive meeting "${meeting.title || meeting.meeting_title}" — team: "${meeting.recorded_by?.team}"`
-            );
-          }
-          return !excluded;
-        });
+        const maxScan = maxScanForDaysBack(daysBack ?? 30);
+        // Fetch a few extra matches so has_more is meaningful, then slice.
+        const matchTarget = Math.min(actualLimit + 5, 50);
+
         console.log(
-          `After team filter: ${afterSecurity.length} (excluded ${allMeetings.length - afterSecurity.length})`
+          `Search "${args.search_term}" query=${JSON.stringify(query)} days_back=${daysBack} limit=${actualLimit} maxScan=${maxScan}`
         );
 
-        let matchingMeetings = afterSecurity.filter((meeting) => meetingMatchesQuery(meeting, query));
-        console.log(`Matched ${matchingMeetings.length} / ${afterSecurity.length} meetings`);
-
-        // Prefer most recent first
-        matchingMeetings = matchingMeetings.sort((a, b) => {
-          const da = new Date(a.scheduled_start_time || a.created_at || 0).getTime();
-          const db = new Date(b.scheduled_start_time || b.created_at || 0).getTime();
-          return db - da;
+        const { matches, scanned, pages, truncated } = await scanMeetingsForQuery({
+          apiParams,
+          query,
+          excludeTeams,
+          matchTarget,
+          maxScan,
         });
 
-        let finalMeetings: any[];
-        let actualLimit: number;
+        const finalMeetings = matches.slice(0, actualLimit);
+        const wantSummary = args.include_summary !== false;
+        const wantTranscript = !!args.include_transcript;
 
-        if (isLastRequest && requestedLastCount) {
-          finalMeetings = matchingMeetings.slice(0, requestedLastCount);
-          actualLimit = requestedLastCount;
-        } else {
-          actualLimit = Math.min(args.limit || 50, 100);
-          finalMeetings = matchingMeetings.slice(0, actualLimit);
-        }
+        const enriched = await enrichMeetings(finalMeetings, {
+          includeSummary: wantSummary,
+          includeTranscript: wantTranscript,
+        });
 
-        const formattedMeetings = finalMeetings.map((meeting) => ({
+        const formattedMeetings = enriched.map((meeting) => ({
           title: meeting.title || meeting.meeting_title,
           date: meeting.scheduled_start_time || meeting.created_at,
           url: meeting.share_url || meeting.url,
+          recording_id: meeting.recording_id,
           attendees: meeting.calendar_invitees,
           recorded_by: meeting.recorded_by,
-          summary: args.include_summary !== false ? meeting.default_summary : undefined,
+          summary: wantSummary ? meeting.default_summary : undefined,
           action_items: args.include_action_items !== false ? meeting.action_items : undefined,
-          transcript: args.include_transcript ? meeting.transcript : undefined,
+          transcript: wantTranscript ? meeting.transcript : undefined,
         }));
 
         res.json({
@@ -333,17 +371,23 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
                   {
                     search_term: args.search_term,
                     parsed_query: query,
-                    total_found: matchingMeetings.length,
-                    showing: finalMeetings.length,
-                    has_more: matchingMeetings.length > actualLimit,
+                    total_found: matches.length,
+                    showing: formattedMeetings.length,
+                    has_more: matches.length > actualLimit || truncated,
+                    scan: {
+                      meetings_scanned: scanned,
+                      pages,
+                      max_scan: maxScan,
+                      truncated,
+                      note: "Fathom has no native text search; scan is a bounded lightweight list + client filter.",
+                    },
                     filters_applied: {
                       exclude_teams: excludeTeams.filter((t) => t),
                       exclude_private: !!args.exclude_private,
-                      days_back: args.days_back || 180,
-                      include_summary: args.include_summary !== false,
+                      days_back: daysBack ?? undefined,
+                      include_summary: wantSummary,
                       include_action_items: args.include_action_items !== false,
-                      include_transcript: args.include_transcript || false,
-                      client_side_domain_matching: true,
+                      include_transcript: wantTranscript,
                     },
                     meetings: formattedMeetings,
                   },
@@ -366,7 +410,6 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
       return;
     }
 
-    console.log("Unknown MCP method:", method);
     res.status(400).json({ error: `Unknown method: ${method}` });
   } catch (error) {
     console.error("Failed to handle MCP request:", error);
@@ -375,14 +418,8 @@ async function handleMCPRequest(req: express.Request, res: express.Response) {
 }
 
 async function main() {
-  console.log("Starting Fathom MCP Server...");
-  console.log("Environment variables check:");
-  console.log("- FATHOM_API_KEY:", apiKey ? "SET" : "NOT SET");
-  console.log("- MCP_BEARER_TOKEN:", bearerToken ? "SET" : "NOT SET");
-
   const app = express();
   const port = process.env.PORT || 3000;
-  console.log(`Using port: ${port}`);
 
   app.use((req, res, next) => {
     req.setTimeout(300000);
@@ -393,16 +430,14 @@ async function main() {
   app.use(cors());
   app.use(express.json({ limit: "10mb" }));
 
-  app.get("/health", (req, res) => {
+  app.get("/health", (_req, res) => {
     res.json({ status: "ok", service: "mcp-fathom-server" });
   });
 
   app.post("/sse", authenticateSSE);
 
   const server = app.listen(port, () => {
-    console.log(`Fathom MCP Server running on port ${port}`);
-    console.log(`SSE endpoint available at: http://localhost:${port}/sse`);
-    console.log(`Health check available at: http://localhost:${port}/health`);
+    console.log(`Fathom MCP Server on port ${port}`);
   });
 
   server.keepAliveTimeout = 300000;
